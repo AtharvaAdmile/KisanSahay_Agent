@@ -23,6 +23,7 @@ from agent.executor import Executor
 from browser.controller import PMFBYBrowser
 from utils import logger
 from utils.helpers import display_result, save_json
+from utils.user_profile import UserProfile, run_setup_wizard
 
 
 async def run(prompt: str, headless: bool = True, verbose: bool = False) -> dict:
@@ -42,6 +43,22 @@ async def run(prompt: str, headless: bool = True, verbose: bool = False) -> dict
             f"Low confidence ({confidence:.0%}) on intent '{intent}'. "
             "The agent may not perform the desired action."
         )
+
+    # Merge user profile as defaults (profile values are lower priority than
+    # params extracted from the prompt — prompt wins on conflicts)
+    profile = UserProfile()
+    if not profile.is_empty():
+        profile_params = profile.to_params()
+        # Only use profile fields that are NOT already in parsed params
+        merged = {**profile_params, **params}
+        if verbose:
+            new_fields = {k: v for k, v in profile_params.items() if k not in params}
+            if new_fields:
+                logger.info(f"Pre-filled from profile: {list(new_fields.keys())}")
+        params = merged
+        intent_result["params"] = params
+    else:
+        logger.debug("No profile found — run with --setup-profile to save your details.", verbose)
 
     # Step 2: Create plan
     logger.section("Action Planning")
@@ -102,7 +119,8 @@ def main():
 
     parser.add_argument(
         "--prompt", "-p",
-        required=True,
+        required=False,  # Not required when using --setup-profile
+        default=None,
         help="Natural language task description (e.g., 'fill the insurance application')",
     )
     parser.add_argument(
@@ -117,8 +135,23 @@ def main():
         default=False,
         help="Enable verbose/debug output",
     )
+    parser.add_argument(
+        "--setup-profile",
+        action="store_true",
+        default=False,
+        help="Interactively set up your farmer profile for form auto-filling (no browser needed)",
+    )
 
     args = parser.parse_args()
+
+    # Short-circuit: --setup-profile needs no browser or prompt
+    if args.setup_profile:
+        logger.banner()
+        run_setup_wizard()
+        return
+
+    if not args.prompt:
+        parser.error("--prompt is required unless --setup-profile is specified")
 
     logger.banner()
     logger.info(f"Prompt: \"{args.prompt}\"")

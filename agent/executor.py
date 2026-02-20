@@ -36,6 +36,18 @@ class Executor:
             elif name == "site_explorer":
                 from tasks.site_explorer import SiteExplorerTask
                 self._handlers[name] = SiteExplorerTask(self.browser, self.verbose)
+            elif name == "lms_access":
+                from tasks.lms_access import LMSAccessTask
+                self._handlers[name] = LMSAccessTask(self.browser, self.verbose)
+            elif name == "winds_access":
+                from tasks.winds_access import WINDSAccessTask
+                self._handlers[name] = WINDSAccessTask(self.browser, self.verbose)
+            elif name == "cropic_access":
+                from tasks.cropic_access import CROPICAccessTask
+                self._handlers[name] = CROPICAccessTask(self.browser, self.verbose)
+            elif name == "yestech_access":
+                from tasks.yestech_access import YESTECHAccessTask
+                self._handlers[name] = YESTECHAccessTask(self.browser, self.verbose)
             else:
                 raise ValueError(f"Unknown task handler: {name}")
         return self._handlers[name]
@@ -51,6 +63,11 @@ class Executor:
             try:
                 if action == "navigate":
                     await self.browser.navigate(step["url"])
+
+                elif action == "setup_profile":
+                    from utils.user_profile import run_setup_wizard
+                    run_setup_wizard()
+                    self.results["profile_setup"] = "completed"
 
                 elif action == "click":
                     await self.browser.click(step["selector"])

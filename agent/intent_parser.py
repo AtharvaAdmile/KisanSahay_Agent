@@ -14,13 +14,20 @@ from utils import logger
 load_dotenv()
 
 INTENT_SCHEMA = {
-    "traverse_site": "Explore pages, build sitemap, list links",
-    "apply_insurance": "Fill farmer registration / crop insurance form",
-    "calculate_premium": "Calculate insurance premium for a crop",
-    "check_status": "Check application status using receipt/policy number",
-    "raise_grievance": "File a complaint or report crop loss via KRPH",
-    "navigate_page": "Navigate to a specific page (FAQ, contact, sitemap, etc.)",
-    "get_info": "Get information about the PMFBY scheme, documents, or guidelines",
+    "traverse_site":      "Explore pages, build sitemap, list links",
+    "apply_insurance":    "Fill farmer registration / crop insurance form",
+    "calculate_premium":  "Calculate insurance premium for a crop",
+    "check_status":       "Check application status using receipt/policy number",
+    "raise_grievance":    "File a complaint or report crop loss via KRPH",
+    "check_complaint":    "Check KRPH complaint/crop-loss intimation status",
+    "access_lms":         "Register or log in to PMFBY LMS for training courses",
+    "view_weather":       "View weather data on the WINDS portal",
+    "upload_crop_photo":  "Upload a crop photo via the CROPIC portal",
+    "track_cropic":       "Track crop photo submission status on CROPIC",
+    "access_yestech":     "Navigate to the YES-TECH yield estimation portal",
+    "navigate_page":      "Navigate to a specific page (FAQ, contact, sitemap, etc.)",
+    "get_info":           "Get information about the PMFBY scheme, documents, or eligibility",
+    "setup_profile":      "Set up or update the local farmer profile for form pre-filling",
 }
 
 SYSTEM_PROMPT = """You are an intent classifier for the PMFBY (Pradhan Mantri Fasal Bima Yojana) crop insurance website agent.
@@ -31,8 +38,15 @@ Given a user's natural language prompt, classify it into ONE of these intents:
 - calculate_premium: calculating insurance premium for a crop/season/area
 - check_status: checking application status with a receipt or policy number
 - raise_grievance: filing complaints, reporting crop loss, KRPH grievance
-- navigate_page: opening a specific page like FAQ, contact, sitemap, feedback
+- check_complaint: checking KRPH complaint status or crop loss intimation status
+- access_lms: register or log in to PMFBY LMS for training or courses
+- view_weather: view weather data / WINDS portal
+- upload_crop_photo: upload crop photo via CROPIC portal
+- track_cropic: track crop photo submission status on CROPIC
+- access_yestech: navigate to YES-TECH yield estimation portal
+- navigate_page: opening a specific page (FAQ, contact, sitemap, feedback)
 - get_info: asking about the PMFBY scheme, required documents, eligibility
+- setup_profile: set up or update the local farmer profile for form auto-filling
 
 Also extract any parameters mentioned in the prompt. Common parameters:
 - receipt_number / policy_id: for status checks
@@ -41,6 +55,8 @@ Also extract any parameters mentioned in the prompt. Common parameters:
 - state: Indian state name
 - district: district name
 - area: area in hectares
+- mobile: mobile phone number
+- reference_id: reference ID for CROPIC tracking
 - page: specific page name (faq, contact, sitemap, feedback, etc.)
 
 Respond with ONLY a JSON object (no markdown, no explanation):
@@ -99,6 +115,62 @@ FEW_SHOT_EXAMPLES = [
     {
         "role": "assistant",
         "content": '{"intent": "navigate_page", "params": {"page": "faq"}, "confidence": 0.96, "explanation": "User wants to navigate to the FAQ page"}'
+    },
+    {
+        "role": "user",
+        "content": "access LMS for training on crop insurance"
+    },
+    {
+        "role": "assistant",
+        "content": '{"intent": "access_lms", "params": {}, "confidence": 0.95, "explanation": "User wants to access the LMS portal for training courses"}'
+    },
+    {
+        "role": "user",
+        "content": "check my complaint status on KRPH"
+    },
+    {
+        "role": "assistant",
+        "content": '{"intent": "check_complaint", "params": {}, "confidence": 0.94, "explanation": "User wants to view their complaint status on the KRPH portal"}'
+    },
+    {
+        "role": "user",
+        "content": "show me the weather data on WINDS"
+    },
+    {
+        "role": "assistant",
+        "content": '{"intent": "view_weather", "params": {}, "confidence": 0.96, "explanation": "User wants to view weather information on the WINDS portal"}'
+    },
+    {
+        "role": "user",
+        "content": "upload crop photo for insurance assessment"
+    },
+    {
+        "role": "assistant",
+        "content": '{"intent": "upload_crop_photo", "params": {}, "confidence": 0.95, "explanation": "User wants to upload a crop photo via CROPIC"}'
+    },
+    {
+        "role": "user",
+        "content": "track my CROPIC photo submission status using reference ABC456"
+    },
+    {
+        "role": "assistant",
+        "content": '{"intent": "track_cropic", "params": {"reference_id": "ABC456"}, "confidence": 0.97, "explanation": "User wants to track their crop photo submission status on CROPIC"}'
+    },
+    {
+        "role": "user",
+        "content": "open YES-TECH yield estimation portal"
+    },
+    {
+        "role": "assistant",
+        "content": '{"intent": "access_yestech", "params": {}, "confidence": 0.95, "explanation": "User wants to navigate to the YES-TECH portal"}'
+    },
+    {
+        "role": "user",
+        "content": "set up my farmer profile"
+    },
+    {
+        "role": "assistant",
+        "content": '{"intent": "setup_profile", "params": {}, "confidence": 0.97, "explanation": "User wants to configure their local farmer profile for form auto-filling"}'
     },
 ]
 

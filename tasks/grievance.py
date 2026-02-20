@@ -172,3 +172,103 @@ class GrievanceTask:
             "status": "completed",
             "result_preview": body[:400] if body else "See screenshots",
         }
+
+    async def check_complaint_status(self, **pre_params) -> dict:
+        """
+        Navigate to KRPH → Farmer Corner → Complaint Status.
+        Authenticate via Mobile OTP, then extract and display complaint list.
+
+        FINDING: Complaint Status requires the SAME mobile OTP flow as
+        Crop Loss Intimation (not a reference-number lookup as might be expected).
+        """
+        logger.section("KRPH — Complaint Status Check")
+        logger.info(f"Navigating to KRPH portal: {self.KRPH_URL}\n")
+
+        page = self.browser.page
+        await self.browser.navigate(self.KRPH_URL)
+        await asyncio.sleep(5)
+
+        # Open Farmer Corner dropdown
+        logger.step("Opening 'Farmer Corner' menu in KRPH...")
+        try:
+            farmer_corner = page.locator(
+                "button:has-text('Farmer Corner'), a:has-text('Farmer Corner')"
+            )
+            await farmer_corner.first.wait_for(state="visible", timeout=10000)
+            await farmer_corner.first.click()
+            await asyncio.sleep(2)
+            logger.success("Farmer Corner menu opened")
+        except Exception as e:
+            logger.error(f"Could not open Farmer Corner menu: {e}")
+            await self.browser.handoff_to_user(
+                "Please click 'Farmer Corner' in the KRPH navigation menu, "
+                "then type 'continue'."
+            )
+
+        # Click "Complaint Status"
+        logger.step("Clicking 'Complaint Status'...")
+        try:
+            complaint_link = page.locator(
+                "text=Complaint Status, "
+                "[class*='dropdown'] a:has-text('Complaint'), "
+                "li:has-text('Complaint Status') a"
+            )
+            await complaint_link.first.wait_for(state="visible", timeout=6000)
+            await complaint_link.first.click()
+            await asyncio.sleep(3)
+            logger.success("Complaint Status selected")
+        except Exception as e:
+            logger.warning(f"Complaint Status click error: {e}")
+            await self.browser.handoff_to_user(
+                "Please click 'Complaint Status' in the Farmer Corner dropdown, "
+                "then type 'continue'."
+            )
+
+        # Mobile OTP authentication (same flow as crop loss intimation)
+        logger.section("Mobile OTP Authentication")
+        mobile = pre_params.get("mobile") or prompt_user(
+            "Your registered mobile number (10 digits)"
+        )
+        if mobile:
+            await self.browser.handle_otp_flow(
+                mobile=mobile,
+                mobile_selector="input#mobile-number",
+                captcha_input_selector="input[placeholder='Enter Captcha Code']",
+                otp_btn_selector=".get-otpN",
+            )
+
+        # Extract complaint status list
+        await asyncio.sleep(3)
+        result_text = ""
+        for sel in [
+            "table",
+            "[class*='complaint']",
+            "[class*='status']",
+            "main",
+            "body",
+        ]:
+            try:
+                txt = await page.inner_text(sel)
+                if txt and len(txt.strip()) > 30:
+                    result_text = txt.strip()
+                    break
+            except Exception:
+                continue
+
+        if result_text:
+            logger.section("Complaint Status Results")
+            for line in result_text.split("\n")[:25]:
+                if line.strip():
+                    logger.info(f"  {line.strip()}")
+        else:
+            logger.warning("Could not auto-extract complaints — check the browser window.")
+
+        await self.browser.screenshot("complaint_status_result")
+
+        return {
+            "task": "grievance",
+            "action": "check_complaint_status",
+            "mobile": mobile or "",
+            "status": "completed",
+            "result_preview": result_text[:600] if result_text else "See complaint_status_result.png",
+        }

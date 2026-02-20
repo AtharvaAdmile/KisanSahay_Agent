@@ -399,6 +399,102 @@ class PMFBYBrowser:
         )
         return links
 
+    # ── CAPTCHA / OTP helpers ────────────────────────────────────────────────
+
+    async def detect_captcha(self) -> bool:
+        """
+        Return True if a CAPTCHA element is visible on the current page.
+        Checks image-based CAPTCHAs (img src), canvas CAPTCHAs, and common IDs.
+        """
+        selectors = [
+            "img[src*='captcha']",
+            "img[src*='Captcha']",
+            "img[id*='captcha']",
+            "img[id*='Captcha']",
+            "canvas[id*='captcha']",
+            "#captchaImg",
+            ".captcha-img",
+            "[class*='captcha'] img",
+            "[class*='Captcha'] img",
+        ]
+        for sel in selectors:
+            if await self.is_visible(sel):
+                logger.debug(f"CAPTCHA detected via selector: {sel}", self.verbose)
+                return True
+        return False
+
+    async def handle_captcha(self, input_selector: str = None) -> bool:
+        """
+        Detect a CAPTCHA on the page, take a screenshot, and hand off to the user
+        for manual solving.  Optionally specify an `input_selector` for the
+        CAPTCHA text box (not needed when the user fills it directly in the browser).
+
+        Returns True after the user confirms completion.
+        """
+        await self.screenshot("captcha_detected")
+        logger.warning(
+            "CAPTCHA detected — manual interaction required.\n"
+            "The current page screenshot has been saved."
+        )
+        await self.handoff_to_user(
+            "Please solve the CAPTCHA shown in the browser window, "
+            "enter the solution in the CAPTCHA field, then type 'continue'."
+        )
+        return True
+
+    async def handle_otp_flow(
+        self,
+        mobile: str,
+        mobile_selector: str = "input#mobile-number",
+        captcha_input_selector: str = "input[placeholder='Enter Captcha Code']",
+        otp_btn_selector: str = ".get-otpN",
+    ) -> bool:
+        """
+        Standard PMFBY OTP flow used by KRPH and other portals:
+          1. Fill mobile number field
+          2. Detect and hand off CAPTCHA
+          3. Click 'Send OTP'
+          4. Hand off for OTP entry
+
+        Args:
+            mobile:               The 10-digit mobile number string.
+            mobile_selector:      CSS selector for the mobile input field.
+            captcha_input_selector: CSS selector for the CAPTCHA text field.
+            otp_btn_selector:     CSS selector for the 'Send OTP' button.
+
+        Returns True on successful completion of the handoff sequence.
+        """
+        logger.step("Starting OTP flow...")
+
+        # Step 1: Fill mobile number
+        await self.vision_fill(
+            mobile_selector, mobile,
+            "the mobile number input field"
+        )
+
+        # Step 2: CAPTCHA (screenshot + handoff)
+        await self.screenshot("otp_flow_captcha")
+        logger.warning("CAPTCHA required before OTP can be sent.")
+        await self.handoff_to_user(
+            f"Please:\n"
+            f"  1. Solve the CAPTCHA shown in the browser\n"
+            f"  2. Enter it in the CAPTCHA field\n"
+            f"  3. Click 'Send OTP'\n"
+            f"  Then type 'continue' here."
+        )
+
+        # Step 3: OTP entry (user fills OTP after clicking Send OTP)
+        await asyncio.sleep(2)
+        logger.warning(f"OTP has been sent to {mobile}.")
+        await self.handoff_to_user(
+            f"An OTP was sent to {mobile}. "
+            "Please enter it in the browser OTP field, then type 'continue'."
+        )
+
+        await asyncio.sleep(2)
+        logger.success("OTP flow handoffs completed — resuming automation.")
+        return True
+
     async def close(self) -> None:
         """Clean up browser resources."""
         if self._context:
