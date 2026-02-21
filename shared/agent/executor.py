@@ -14,6 +14,7 @@ import asyncio
 from ..config.base import SiteConfig
 from ..browser.controller import Browser
 from ..agent.navigator import Navigator
+from ..agent.reasoning import ReasoningEngine
 from ..utils import logger
 from ..utils.user_profile import UserProfile
 
@@ -28,6 +29,9 @@ class Executor:
         self._handlers = {}
         self.results = {}
         self._navigator = Navigator(browser, config, verbose=verbose)
+        self.reasoning = ReasoningEngine(config, verbose=verbose)
+        self.user_input_queue = asyncio.Queue()
+        self.agent_output_queue = asyncio.Queue()
         self._current_intent = "get_info"
 
     def set_intent(self, intent: str) -> None:
@@ -136,19 +140,69 @@ class Executor:
         else:
             logger.warning(f"Unknown action: {action}")
 
-    async def execute(self, plan: list[dict]) -> dict:
+    async def execute(self, plan: list[dict], profile: dict = None) -> dict:
         """
         Execute a full action plan step by step.
 
-        On failure, the Navigator attempts to reroute to the correct page
-        for the current intent and retries the step once. If recovery also
-        fails, the agent hands off to the user and re-raises.
+        Runs a reasoning loop evaluating the DOM before executing each interactive step.
         """
         logger.section("Executing Plan", style=self.config.banner_color)
 
         for i, step in enumerate(plan, 1):
             action = step.get("action")
             logger.step(f"Step {i}/{len(plan)}: {action}")
+
+            if action in ["fill", "click", "select", "task"]:
+                # ReAct Evaluation Loop
+                while True:
+                    logger.info("Executing reasoning loop to check DOM state...")
+                    dom_state = await self.browser.get_dom_state()
+                    
+                    decision = self.reasoning.decide_next_step(
+                        intent=self._current_intent,
+                        dom_state=dom_state,
+                        step=step,
+                        profile=profile
+                    )
+                    
+                    d_type = decision.get("type", "ACTION")
+                    
+                    if d_type == "ASK_USER":
+                        question = decision.get("question", "I need more information.")
+                        options = decision.get("options", [])
+                        
+                        logger.warning(f"Yielding to user: {question}")
+                        await self.agent_output_queue.put({
+                            "status": "requires_input",
+                            "question": question,
+                            "options": options
+                        })
+                        
+                        user_answer = await self.user_input_queue.get()
+                        logger.info(f"Received user answer: {user_answer}")
+                        
+                        if isinstance(profile, dict):
+                            if "_history" not in profile:
+                                profile["_history"] = {}
+                            profile["_history"][question] = user_answer
+                            
+                    elif d_type == "READY_TO_SUBMIT":
+                        await self.agent_output_queue.put({
+                            "status": "ready_to_submit",
+                            "summary": decision.get("summary", {})
+                        })
+                        logger.info("Waiting for final user confirmation...")
+                        await self.user_input_queue.get()
+                        logger.info("User confirmed final submission.")
+                        break  # Proceed to execute the submit step
+                        
+                    else:  # ACTION
+                        # The LLM says we have enough data (or it proposed a dynamic action).
+                        # We break the reasoning loop to let the planned step execute.
+                        # Alternatively, we could execute the LLM's dynamic action here, but
+                        # for safety, we'll let the deterministic planned step run.
+                        logger.info("Reasoning complete. Proceeding with planned step.")
+                        break
 
             try:
                 await self._run_step(step)

@@ -523,6 +523,71 @@ class Browser:
         )
         return links
 
+    async def get_dom_state(self) -> list[dict]:
+        """
+        Extract a structured representation of the currently visible and interactable
+        form elements (inputs, selects, buttons) to pass to the ReasoningEngine.
+        """
+        js = """
+        () => {
+            const isVisible = (elem) => !!( elem.offsetWidth || elem.offsetHeight || elem.getClientRects().length );
+            
+            const results = [];
+            
+            // 1. Inputs
+            document.querySelectorAll('input:not([type="hidden"])').forEach(el => {
+                if (!isVisible(el) || el.disabled) return;
+                results.push({
+                    type: "input",
+                    inputType: el.type,
+                    id: el.id,
+                    name: el.name,
+                    placeholder: el.placeholder,
+                    value: el.value,
+                    selector: el.id ? `#${el.id}` : (el.name ? `input[name="${el.name}"]` : null)
+                });
+            });
+            
+            // 2. Selects
+            document.querySelectorAll('select').forEach(el => {
+                if (!isVisible(el) || el.disabled) return;
+                const options = Array.from(el.options)
+                    .map(o => ({ value: o.value, text: o.text.trim() }))
+                    .filter(o => o.value && o.text && o.text.toLowerCase() !== "select");
+                
+                results.push({
+                    type: "select",
+                    id: el.id,
+                    name: el.name,
+                    value: el.value,
+                    options: options,
+                    selector: el.id ? `#${el.id}` : (el.name ? `select[name="${el.name}"]` : null)
+                });
+            });
+            
+            // 3. Buttons
+            document.querySelectorAll('button, input[type="submit"], input[type="button"], a.btn').forEach(el => {
+                if (!isVisible(el) || el.disabled) return;
+                results.push({
+                    type: "button",
+                    text: el.innerText ? el.innerText.trim() : el.value,
+                    id: el.id,
+                    selector: el.id ? `#${el.id}` : null
+                });
+            });
+            
+            // Filter out items without a reliable CSS selector
+            return results.filter(r => r.selector !== null);
+        }
+        """
+        try:
+            return await self.page.evaluate(js)
+        except Exception as e:
+            logger.error(f"Failed to get DOM state: {e}")
+            return []
+
+        return links
+
     async def close(self) -> None:
         """Clean up browser resources."""
         if self._context:
