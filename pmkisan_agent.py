@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-PMFBY AI Agent — CLI Entry Point
-Pradhan Mantri Fasal Bima Yojana (Crop Insurance) Browser Automation Agent.
+PM-KISAN AI Agent — CLI Entry Point
+Pradhan Mantri Kisan Samman Nidhi Browser Automation Agent.
 
 Usage:
-    python pmfby_agent.py --prompt "help me fill the application form"
-    python pmfby_agent.py --prompt "check my status using ABC123" --no-headless
-    python pmfby_agent.py --prompt "explore the site" --verbose
+    python pmkisan_agent.py --prompt "register for PM-KISAN"
+    python pmkisan_agent.py --prompt "check my beneficiary status" --no-headless
+    python pmkisan_agent.py --prompt "download KCC form" --verbose
+    python pmkisan_agent.py --setup-profile
 """
 
 import argparse
@@ -16,7 +17,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from shared.config.pmfby import PMFBY_CONFIG
+from shared.config.pmkisan import PMKISAN_CONFIG
 from shared.agent.intent_parser import IntentParser
 from shared.agent.planner import create_plan_for_intent
 from shared.agent.executor import Executor
@@ -28,7 +29,7 @@ from shared.utils.user_profile import UserProfile
 
 async def run(prompt: str, headless: bool = True, verbose: bool = False) -> dict:
     """Main agent loop: parse → plan → execute → report."""
-    config = PMFBY_CONFIG
+    config = PMKISAN_CONFIG
 
     logger.section("Intent Classification", style=config.banner_color)
     parser = IntentParser(config, verbose=verbose)
@@ -103,13 +104,14 @@ async def run(prompt: str, headless: bool = True, verbose: bool = False) -> dict
 
 def main():
     parser = argparse.ArgumentParser(
-        description="PMFBY AI Agent — Crop Insurance Website Automation",
+        description="PM-KISAN AI Agent — Kisan Samman Nidhi Website Automation",
         epilog=(
             "Examples:\n"
-            '  python pmfby_agent.py --prompt "help me fill the application form"\n'
-            '  python pmfby_agent.py --prompt "check status using receipt ABC123" --no-headless\n'
-            '  python pmfby_agent.py --prompt "calculate premium for wheat in Kharif"\n'
-            '  python pmfby_agent.py --prompt "explore the pmfby site" --verbose\n'
+            '  python pmkisan_agent.py --prompt "register for PM-KISAN"\n'
+            '  python pmkisan_agent.py --prompt "check my beneficiary status" --no-headless\n'
+            '  python pmkisan_agent.py --prompt "get beneficiary list for Maharashtra, Pune district"\n'
+            '  python pmkisan_agent.py --prompt "download KCC form" --verbose\n'
+            '  python pmkisan_agent.py --setup-profile\n'
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -118,7 +120,7 @@ def main():
         "--prompt", "-p",
         required=False,
         default=None,
-        help="Natural language task description (e.g., 'fill the insurance application')",
+        help="Natural language task description",
     )
     parser.add_argument(
         "--no-headless",
@@ -136,28 +138,28 @@ def main():
         "--setup-profile",
         action="store_true",
         default=False,
-        help="Interactively set up your farmer profile for form auto-filling (no browser needed)",
+        help="Interactively set up your farmer profile for form auto-filling",
     )
 
     args = parser.parse_args()
 
     if args.setup_profile:
-        logger.banner(PMFBY_CONFIG.banner_text, PMFBY_CONFIG.banner_color)
+        logger.banner(PMKISAN_CONFIG.banner_text, PMKISAN_CONFIG.banner_color)
         from shared.utils.user_profile import run_setup_wizard
         run_setup_wizard(
-            profile_path=PMFBY_CONFIG.profile_path,
-            sensitive_keys=PMFBY_CONFIG.sensitive_keys,
-            keyring_service=PMFBY_CONFIG.keyring_service,
-            site_name=PMFBY_CONFIG.site_name,
-            include_crop_fields=True,
-            include_portal_credentials=True,
+            profile_path=PMKISAN_CONFIG.profile_path,
+            sensitive_keys=PMKISAN_CONFIG.sensitive_keys,
+            keyring_service=PMKISAN_CONFIG.keyring_service,
+            site_name=PMKISAN_CONFIG.site_name,
+            include_crop_fields=False,
+            include_portal_credentials=False,
         )
         return
 
     if not args.prompt:
         parser.error("--prompt is required unless --setup-profile is specified")
 
-    logger.banner(PMFBY_CONFIG.banner_text, PMFBY_CONFIG.banner_color)
+    logger.banner(PMKISAN_CONFIG.banner_text, PMKISAN_CONFIG.banner_color)
     logger.info(f"Prompt: \"{args.prompt}\"")
     logger.info(f"Mode:   {'Headed (visible)' if args.no_headless else 'Headless'}")
     logger.info(f"Verbose: {args.verbose}\n")

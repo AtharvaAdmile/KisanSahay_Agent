@@ -1,7 +1,12 @@
 """
-Async Playwright browser controller for PMFBY Agent.
-Every action includes a mandatory 2-3 second delay to respect the government server.
+Async Playwright browser controller for Government Scheme Agents.
+Every action includes a mandatory 2-3 second delay to respect government servers.
 Includes handoff_to_user for CAPTCHA/OTP challenges.
+
+Site-specific behaviors are controlled by the SiteConfig:
+  - has_homepage_modal: Whether to dismiss modal on homepage
+  - uses_aspnet_postback: Whether to wait for __doPostBack
+  - has_language_selector: Whether set_language() is available
 """
 
 import asyncio
@@ -9,14 +14,13 @@ import random
 from pathlib import Path
 from playwright.async_api import async_playwright, Browser, Page, BrowserContext
 
-from utils import logger
-from utils.helpers import wait_for_continue
-from utils.vision import VisionHelper
+from ..config.base import SiteConfig
+from ..utils import logger
+from ..utils.helpers import wait_for_continue
+from ..utils.vision import VisionHelper
 
-BASE_URL = "https://pmfby.gov.in"
 ACTION_DELAY_MIN = 2.0
 ACTION_DELAY_MAX = 3.0
-NAVIGATE_DELAY = 3.0
 MAX_RETRIES = 3
 
 
@@ -26,10 +30,11 @@ async def _delay(min_s: float = ACTION_DELAY_MIN, max_s: float = ACTION_DELAY_MA
     await asyncio.sleep(wait)
 
 
-class PMFBYBrowser:
+class Browser:
     """Async Playwright wrapper with built-in delays and handoff support."""
 
-    def __init__(self, headless: bool = True, verbose: bool = False):
+    def __init__(self, config: SiteConfig, headless: bool = True, verbose: bool = False):
+        self.config = config
         self.headless = headless
         self._playwright = None
         self._browser: Browser | None = None
@@ -61,15 +66,22 @@ class PMFBYBrowser:
         return self.page
 
     async def navigate(self, url: str) -> None:
-        """Navigate to URL with retry on failure. Adds 3s delay after."""
+        """Navigate to URL with retry on failure. Adds delay after."""
         if not url.startswith("http"):
-            url = f"{BASE_URL}{url}"
+            url = f"{self.config.base_url}{url}"
+
+        timeout = self.config.navigate_timeout
+        delay = self.config.navigate_delay
 
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 logger.step(f"Navigating to {url}")
-                await self.page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                await asyncio.sleep(NAVIGATE_DELAY)
+                try:
+                    await self.page.goto(url, wait_until="load", timeout=timeout)
+                except Exception:
+                    logger.debug(f"Full load timed out — retrying with domcontentloaded", self.verbose)
+                    await self.page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+                await asyncio.sleep(delay)
                 logger.debug(f"Navigation complete (attempt {attempt})", self.verbose)
                 return
             except Exception as e:
@@ -100,14 +112,14 @@ class PMFBYBrowser:
 
     async def select_option(self, selector: str, value: str = None,
                             label: str = None, timeout: int = 10000) -> None:
-        """Select a dropdown option, then delay 3s for AJAX loading."""
+        """Select a dropdown option, then delay for AJAX loading."""
         logger.debug(f"Selecting option in: {selector}", self.verbose)
         await self.page.wait_for_selector(selector, timeout=timeout)
         if value:
             await self.page.select_option(selector, value=value)
         elif label:
             await self.page.select_option(selector, label=label)
-        await asyncio.sleep(NAVIGATE_DELAY)  # AJAX wait
+        await asyncio.sleep(self.config.navigate_delay)
 
     async def wait_for(self, selector: str, timeout: int = 15000) -> None:
         """Wait for a selector to appear."""
@@ -120,6 +132,19 @@ class PMFBYBrowser:
             await self.page.wait_for_load_state("networkidle", timeout=timeout)
         except Exception:
             logger.debug("Network idle timeout — continuing anyway", self.verbose)
+
+    async def wait_for_postback(self, timeout: int = 12000) -> None:
+        """
+        Wait for an ASP.NET __doPostBack to complete.
+        Only used when config.uses_aspnet_postback is True.
+        """
+        if not self.config.uses_aspnet_postback:
+            return
+        try:
+            await self.page.wait_for_load_state("domcontentloaded", timeout=timeout)
+        except Exception:
+            pass
+        await asyncio.sleep(3)
 
     async def get_text(self, selector: str, timeout: int = 5000) -> str:
         """Extract visible text from an element."""
@@ -151,7 +176,7 @@ class PMFBYBrowser:
         for opt in options:
             value = await opt.get_attribute("value")
             text = (await opt.inner_text()).strip()
-            if value and text and text != "Select" and text != "--Select--":
+            if value and text and text not in ("Select", "--Select--", "--Select State--"):
                 results.append({"value": value, "text": text})
         return results
 
@@ -172,23 +197,73 @@ class PMFBYBrowser:
         logger.info(f"Screenshot saved: {path}")
         return str(path.resolve())
 
-    # ── Vision-assisted interaction methods ──────────────────────────────────
+    async def dismiss_homepage_modal(self) -> None:
+        """
+        Dismiss homepage modal if the site has one.
+        Uses JavaScript DOM removal for reliability.
+        """
+        if not self.config.has_homepage_modal:
+            return
+
+        try:
+            result = await self.page.evaluate("""
+            () => {
+                let removed = 0;
+                document.querySelectorAll(
+                    '.modal, .modal-backdrop, #exampleModal, [id*="modal"]'
+                ).forEach(el => {
+                    el.style.display = 'none';
+                    el.classList.remove('show', 'modal-show', 'fade');
+                    removed++;
+                });
+                document.body.classList.remove('modal-open');
+                document.body.style.overflow = 'auto';
+                document.body.style.paddingRight = '';
+                return removed;
+            }
+            """)
+            if result and int(result) > 0:
+                logger.debug(f"Modal dismissed via JS ({result} element(s) hidden)", self.verbose)
+                await asyncio.sleep(0.5)
+                return
+        except Exception as e:
+            logger.debug(f"JS modal dismissal attempted: {e}", self.verbose)
+
+        for sel in ["button.close", "[aria-label='Close']", ".modal-header .close",
+                    "button[data-dismiss='modal']", ".btn-close"]:
+            try:
+                if await self.is_visible(sel):
+                    await self.page.click(sel, timeout=2000)
+                    await asyncio.sleep(0.5)
+                    logger.debug(f"Modal closed via click ({sel})", self.verbose)
+                    return
+            except Exception:
+                continue
+        logger.debug("No modal found (or already closed)", self.verbose)
+
+    async def set_language(self, lang: str = "English") -> bool:
+        """
+        Switch the site language using the language dropdown.
+        Only works if config.has_language_selector is True.
+        """
+        if not self.config.has_language_selector:
+            logger.warning("This site does not have a language selector")
+            return False
+
+        try:
+            await self.page.select_option("#ddlLanguage", label=lang)
+            await asyncio.sleep(2)
+            logger.success(f"Language switched to: {lang}")
+            return True
+        except Exception as e:
+            logger.warning(f"Could not switch language to '{lang}': {e}")
+            return False
 
     async def vision_click(self, selector: str, description: str,
                            timeout: int = 8000) -> bool:
         """
-        Try to click 'selector'. If it fails, take a screenshot and ask the
-        VLM to visually locate the element described by 'description',
-        then click its coordinates.
-
-        Args:
-            selector:    Playwright CSS/text selector (tried first).
-            description: Human-readable description for the VLM fallback,
-                         e.g. 'the blue Calculate button in the modal'.
-            timeout:     Timeout for the primary selector attempt (ms).
-
-        Returns:
-            True if click succeeded (via either method), False otherwise.
+        Try to click 'selector'. If it fails, use VLM to visually locate
+        the element and click its coordinates.
         """
         try:
             locator = self.page.locator(selector).first
@@ -202,7 +277,6 @@ class PMFBYBrowser:
                 f"   → Falling back to VLM vision"
             )
 
-        # Vision fallback
         if not self._vision.available:
             logger.error("   Vision fallback unavailable — no API key configured")
             return False
@@ -228,15 +302,6 @@ class PMFBYBrowser:
         """
         Try to fill 'selector'. If it fails, use VLM to click the field
         visually, then type the value.
-
-        Args:
-            selector:    Playwright CSS selector (tried first).
-            value:       Text to type into the field.
-            description: Human-readable description for VLM fallback.
-            timeout:     Timeout for primary selector (ms).
-
-        Returns:
-            True if fill succeeded, False otherwise.
         """
         try:
             locator = self.page.locator(selector).first
@@ -252,7 +317,6 @@ class PMFBYBrowser:
                 f"   → Falling back to VLM vision for '{description}'"
             )
 
-        # Vision fallback — click then type
         if not self._vision.available:
             logger.error("   Vision fallback unavailable — no API key configured")
             return False
@@ -271,7 +335,6 @@ class PMFBYBrowser:
         logger.info(f"👁  Vision fill at ({x}, {y}) — typing '{value[:20]}'")
         await self.page.mouse.click(x, y)
         await asyncio.sleep(0.5)
-        # Select all + type to replace any existing content
         await self.page.keyboard.press("Control+a")
         await self.page.keyboard.type(value, delay=60)
         await _delay()
@@ -281,17 +344,7 @@ class PMFBYBrowser:
                             description: str) -> bool:
         """
         Try to set a <select> element by nth() index + JS dispatchEvent.
-        If the option is not found or selection fails, ask VLM to locate
-        the dropdown visually and click on it so the user can see it
-        (or for future coordinate-based interaction).
-
-        Args:
-            select_idx:  Index of the <select> element on the page (0-based).
-            label:       Option text to select (fuzzy matched).
-            description: Human-readable description for VLM fallback.
-
-        Returns:
-            True if selection succeeded, False otherwise.
+        If the option is not found, use VLM to locate the dropdown visually.
         """
         js = f"""
         (function() {{
@@ -319,7 +372,6 @@ class PMFBYBrowser:
             elif result == "NO_ELEMENT":
                 logger.warning(f"  Select[{select_idx}] does not exist on page")
             else:
-                # NOT_FOUND — log available options and use vision fallback for click
                 available = result.replace("NOT_FOUND:", "")
                 logger.warning(
                     f"  Option '{label}' not found in select[{select_idx}].\n"
@@ -328,7 +380,6 @@ class PMFBYBrowser:
         except Exception as e:
             logger.warning(f"  JS select failed for select[{select_idx}]: {e}")
 
-        # Vision fallback — at least visually locate and click the dropdown
         if not self._vision.available:
             return False
 
@@ -344,7 +395,6 @@ class PMFBYBrowser:
             logger.info(f"👁  Vision clicking dropdown at ({x}, {y})")
             await self.page.mouse.click(x, y)
             await asyncio.sleep(1)
-            # Try JS select again after visual click
             try:
                 result2 = await self.page.evaluate(js)
                 if result2.startswith("OK:"):
@@ -355,57 +405,8 @@ class PMFBYBrowser:
                 pass
         return False
 
-    async def handoff_to_user(self, reason: str) -> bool:
-        """
-        Hand off browser control to the user for CAPTCHA/OTP.
-        Switches to headed mode if in headless, waits for 'continue' command.
-        Returns True if the challenge appears resolved.
-        """
-        if self.headless:
-            logger.warning(
-                "CAPTCHA/OTP detected but running in headless mode. "
-                "Please re-run with --no-headless for manual challenges."
-            )
-            # Take a screenshot so user can see the CAPTCHA
-            ss_path = await self.screenshot("captcha_challenge")
-            logger.info(f"Challenge screenshot saved to: {ss_path}")
-
-        logger.warning(f"Manual action required: {reason}")
-
-        # Block until user says continue
-        wait_for_continue(reason)
-
-        # After user continues, give the page a moment to update
-        await asyncio.sleep(2)
-        logger.success("Resuming automated control...")
-        return True
-
-    async def get_page_info(self) -> dict:
-        """Get current page title and URL."""
-        return {
-            "url": self.page.url,
-            "title": await self.page.title(),
-        }
-
-    async def get_all_links(self) -> list[dict]:
-        """Extract all internal links from the current page."""
-        links = await self.page.eval_on_selector_all(
-            "a[href]",
-            """els => els.map(el => ({
-                text: el.innerText.trim(),
-                href: el.href,
-                title: el.getAttribute('title') || ''
-            })).filter(l => l.href.includes('pmfby.gov.in') || l.href.startsWith('/'))"""
-        )
-        return links
-
-    # ── CAPTCHA / OTP helpers ────────────────────────────────────────────────
-
     async def detect_captcha(self) -> bool:
-        """
-        Return True if a CAPTCHA element is visible on the current page.
-        Checks image-based CAPTCHAs (img src), canvas CAPTCHAs, and common IDs.
-        """
+        """Return True if a CAPTCHA element is visible on the current page."""
         selectors = [
             "img[src*='captcha']",
             "img[src*='Captcha']",
@@ -415,7 +416,6 @@ class PMFBYBrowser:
             "#captchaImg",
             ".captcha-img",
             "[class*='captcha'] img",
-            "[class*='Captcha'] img",
         ]
         for sel in selectors:
             if await self.is_visible(sel):
@@ -423,13 +423,10 @@ class PMFBYBrowser:
                 return True
         return False
 
-    async def handle_captcha(self, input_selector: str = None) -> bool:
+    async def handle_captcha(self) -> bool:
         """
-        Detect a CAPTCHA on the page, take a screenshot, and hand off to the user
-        for manual solving.  Optionally specify an `input_selector` for the
-        CAPTCHA text box (not needed when the user fills it directly in the browser).
-
-        Returns True after the user confirms completion.
+        Detect a CAPTCHA on the page, take a screenshot, and hand off to
+        the user for manual solving.
         """
         await self.screenshot("captcha_detected")
         logger.warning(
@@ -444,56 +441,87 @@ class PMFBYBrowser:
 
     async def handle_otp_flow(
         self,
-        mobile: str,
-        mobile_selector: str = "input#mobile-number",
-        captcha_input_selector: str = "input[placeholder='Enter Captcha Code']",
-        otp_btn_selector: str = ".get-otpN",
+        mobile_or_aadhaar: str,
+        input_selector: str,
+        captcha_selector: str = None,
+        otp_btn_selector: str = None,
+        label: str = "mobile number",
     ) -> bool:
         """
-        Standard PMFBY OTP flow used by KRPH and other portals:
-          1. Fill mobile number field
-          2. Detect and hand off CAPTCHA
-          3. Click 'Send OTP'
-          4. Hand off for OTP entry
-
-        Args:
-            mobile:               The 10-digit mobile number string.
-            mobile_selector:      CSS selector for the mobile input field.
-            captcha_input_selector: CSS selector for the CAPTCHA text field.
-            otp_btn_selector:     CSS selector for the 'Send OTP' button.
-
-        Returns True on successful completion of the handoff sequence.
+        Standard OTP flow:
+          1. Fill input field
+          2. Handoff for CAPTCHA solving (if applicable)
+          3. Click OTP button (if applicable)
+          4. Handoff for OTP entry
         """
-        logger.step("Starting OTP flow...")
+        logger.step(f"Starting OTP flow for {label}...")
 
-        # Step 1: Fill mobile number
         await self.vision_fill(
-            mobile_selector, mobile,
-            "the mobile number input field"
+            input_selector, mobile_or_aadhaar,
+            f"the {label} input field"
         )
 
-        # Step 2: CAPTCHA (screenshot + handoff)
-        await self.screenshot("otp_flow_captcha")
-        logger.warning("CAPTCHA required before OTP can be sent.")
-        await self.handoff_to_user(
-            f"Please:\n"
-            f"  1. Solve the CAPTCHA shown in the browser\n"
-            f"  2. Enter it in the CAPTCHA field\n"
-            f"  3. Click 'Send OTP'\n"
-            f"  Then type 'continue' here."
-        )
+        if captcha_selector or otp_btn_selector:
+            await self.screenshot("otp_flow_captcha")
+            logger.warning("CAPTCHA required before OTP can be sent.")
+            instructions = "Please:\n  1. Solve the CAPTCHA shown in the browser\n"
+            if otp_btn_selector:
+                instructions += "  2. Enter it in the CAPTCHA text field\n  3. Click 'Get OTP'\n"
+            else:
+                instructions += "  2. Enter it in the CAPTCHA field\n"
+            instructions += "  Then type 'continue' here."
+            await self.handoff_to_user(instructions)
 
-        # Step 3: OTP entry (user fills OTP after clicking Send OTP)
         await asyncio.sleep(2)
-        logger.warning(f"OTP has been sent to {mobile}.")
+        logger.warning(f"OTP has been sent to your registered number.")
         await self.handoff_to_user(
-            f"An OTP was sent to {mobile}. "
+            "Enter the OTP received on your registered mobile. "
             "Please enter it in the browser OTP field, then type 'continue'."
         )
 
         await asyncio.sleep(2)
         logger.success("OTP flow handoffs completed — resuming automation.")
         return True
+
+    async def handoff_to_user(self, reason: str) -> bool:
+        """
+        Hand off browser control to the user for CAPTCHA/OTP.
+        Warns if in headless mode. Blocks until user types 'continue'.
+        """
+        if self.headless:
+            logger.warning(
+                "CAPTCHA/OTP detected but running in headless mode. "
+                "Please re-run with --no-headless for manual challenges."
+            )
+            ss_path = await self.screenshot("captcha_challenge")
+            logger.info(f"Challenge screenshot saved to: {ss_path}")
+
+        logger.warning(f"Manual action required: {reason}")
+        wait_for_continue(reason)
+
+        await asyncio.sleep(2)
+        logger.success("Resuming automated control...")
+        return True
+
+    async def get_page_info(self) -> dict:
+        """Get current page title and URL."""
+        return {
+            "url": self.page.url,
+            "title": await self.page.title(),
+        }
+
+    async def get_all_links(self) -> list[dict]:
+        """Extract all internal links from the current page."""
+        site_domain = self.config.base_url.replace("https://", "").replace("http://", "")
+        links = await self.page.eval_on_selector_all(
+            "a[href]",
+            f"""els => els.map(el => ({{
+                text: el.innerText.trim(),
+                href: el.href,
+                title: el.getAttribute('title') || ''
+            }})).filter(l => l.href.includes('{site_domain}') || l.href.startsWith('/'))"""
+        )
+        return links
 
     async def close(self) -> None:
         """Clean up browser resources."""

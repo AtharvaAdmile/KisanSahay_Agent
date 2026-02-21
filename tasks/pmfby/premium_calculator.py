@@ -16,14 +16,18 @@ KEY FACTS from live exploration:
   - "PMFBY" is the abbreviation for "Pradhan Mantri Fasal Bima Yojana"
 """
 
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
 import asyncio
 import re
 
 from playwright.async_api import Page
 
-from browser.controller import PMFBYBrowser
-from utils import logger
-from utils.helpers import prompt_user, display_table
+from shared.browser.controller import Browser
+from shared.utils import logger
+from shared.utils.helpers import prompt_user, display_table
 
 
 # ── Custom exception for hard stops ────────────────────────────────────────
@@ -197,7 +201,7 @@ async def _select_required(page: Page, idx: int, label: str,
 class PremiumCalculatorTask:
     """Handles the insurance premium calculation modal on PMFBY homepage."""
 
-    def __init__(self, browser: PMFBYBrowser, verbose: bool = False):
+    def __init__(self, browser: Browser, verbose: bool = False):
         self.browser = browser
         self.verbose = verbose
 

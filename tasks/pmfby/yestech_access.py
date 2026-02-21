@@ -11,10 +11,14 @@ KEY FINDINGS:
 - Limitation: Agent cannot authenticate without departmental credentials
 """
 
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
 import asyncio
 
-from browser.controller import PMFBYBrowser
-from utils import logger
+from shared.browser.controller import Browser
+from shared.utils import logger
 
 YESTECH_URL   = "https://pmfby.gov.in/yestech/"
 YESTECH_LOGIN = "https://pmfby.gov.in/yestech/signin"
@@ -28,7 +32,7 @@ class YESTECHAccessTask:
     the user about its purpose and access requirements.
     """
 
-    def __init__(self, browser: PMFBYBrowser, verbose: bool = False):
+    def __init__(self, browser: Browser, verbose: bool = False):
         self.browser = browser
         self.verbose = verbose
 

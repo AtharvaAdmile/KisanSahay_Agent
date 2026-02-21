@@ -10,11 +10,15 @@ KEY FINDINGS:
 - Nav: Home, Weather Information, Documents, Gallery, External Links, About Us
 """
 
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
 import asyncio
 
-from browser.controller import PMFBYBrowser
-from utils import logger
-from utils.helpers import prompt_user, prompt_confirm
+from shared.browser.controller import Browser
+from shared.utils import logger
+from shared.utils.helpers import prompt_user, prompt_confirm
 
 WINDS_URL = "https://pmfby.gov.in/winds/"
 
@@ -25,7 +29,7 @@ WEATHER_PARAMS = ["Temperature", "Rainfall", "Wind Speed", "Humidity"]
 class WINDSAccessTask:
     """Handles WINDS weather data viewing and login."""
 
-    def __init__(self, browser: PMFBYBrowser, verbose: bool = False):
+    def __init__(self, browser: Browser, verbose: bool = False):
         self.browser = browser
         self.verbose = verbose
 

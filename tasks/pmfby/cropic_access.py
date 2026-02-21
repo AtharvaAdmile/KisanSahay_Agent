@@ -10,11 +10,15 @@ KEY FINDINGS:
 - Status tracking: Reference ID-based, available post-login
 """
 
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
 import asyncio
 
-from browser.controller import PMFBYBrowser
-from utils import logger
-from utils.helpers import prompt_user, prompt_confirm
+from shared.browser.controller import Browser
+from shared.utils import logger
+from shared.utils.helpers import prompt_user, prompt_confirm
 
 CROPIC_URL = "https://pmfby.gov.in/cropic/"
 
@@ -22,7 +26,7 @@ CROPIC_URL = "https://pmfby.gov.in/cropic/"
 class CROPICAccessTask:
     """Handles CROPIC photo upload and status tracking."""
 
-    def __init__(self, browser: PMFBYBrowser, verbose: bool = False):
+    def __init__(self, browser: Browser, verbose: bool = False):
         self.browser = browser
         self.verbose = verbose
 

@@ -1,33 +1,33 @@
 """
-Unit tests for utils/user_profile.py
+Unit tests for shared/utils/user_profile.py
 Run: python -m pytest tests/test_user_profile.py -v
 """
 
 import json
 import os
+import sys
 import tempfile
 from pathlib import Path
 
 import pytest
 
-# Override the profile path before importing to use a temp location
-import unittest.mock as mock
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from shared.config.pmfby import PMFBY_CONFIG
 
 
 @pytest.fixture
 def tmp_profile(tmp_path):
     """Provide a UserProfile instance backed by a temporary directory."""
+    from shared.utils.user_profile import UserProfile
     profile_path = tmp_path / "profile.json"
-    with mock.patch("utils.user_profile.PROFILE_PATH", profile_path):
-        from importlib import reload
-        import utils.user_profile as up_module
-        # Reload so PROFILE_PATH patch takes effect on the module-level constant
-        up_module.PROFILE_PATH = profile_path
-        profile = up_module.UserProfile()
-        yield profile, tmp_path
+    profile = UserProfile(
+        profile_path=profile_path,
+        sensitive_keys=PMFBY_CONFIG.sensitive_keys,
+        keyring_service=PMFBY_CONFIG.keyring_service,
+    )
+    yield profile, tmp_path
 
-
-# ── Basic get/set ────────────────────────────────────────────────────────────
 
 class TestUserProfileGetSet:
     def test_get_missing_returns_default(self, tmp_profile):
@@ -68,25 +68,27 @@ class TestUserProfileGetSet:
         assert not profile.has("personal.mobile")
 
 
-# ── Persistence ──────────────────────────────────────────────────────────────
-
 class TestUserProfilePersistence:
     def test_data_survives_reload(self, tmp_path):
         """Writing to profile and creating a new instance reads the same data."""
-        from unittest.mock import patch
-        import utils.user_profile as up_module
-
+        from shared.utils.user_profile import UserProfile
         profile_path = tmp_path / "profile.json"
 
-        with patch.object(up_module, "PROFILE_PATH", profile_path):
-            p1 = up_module.UserProfile()
-            p1.set("personal.full_name", "Ram Kumar")
-            p1.set("address.state", "Haryana")
+        p1 = UserProfile(
+            profile_path=profile_path,
+            sensitive_keys=PMFBY_CONFIG.sensitive_keys,
+            keyring_service=PMFBY_CONFIG.keyring_service,
+        )
+        p1.set("personal.full_name", "Ram Kumar")
+        p1.set("address.state", "Haryana")
 
-        with patch.object(up_module, "PROFILE_PATH", profile_path):
-            p2 = up_module.UserProfile()
-            assert p2.get("personal.full_name") == "Ram Kumar"
-            assert p2.get("address.state") == "Haryana"
+        p2 = UserProfile(
+            profile_path=profile_path,
+            sensitive_keys=PMFBY_CONFIG.sensitive_keys,
+            keyring_service=PMFBY_CONFIG.keyring_service,
+        )
+        assert p2.get("personal.full_name") == "Ram Kumar"
+        assert p2.get("address.state") == "Haryana"
 
     def test_json_file_is_valid(self, tmp_profile):
         profile, tmp_path = tmp_profile
@@ -95,8 +97,6 @@ class TestUserProfilePersistence:
         data = json.loads(profile_file.read_text(encoding="utf-8"))
         assert data["personal"]["mobile"] == "1234567890"
 
-
-# ── to_params flattening ─────────────────────────────────────────────────────
 
 class TestUserProfileToParams:
     def test_to_params_empty(self, tmp_profile):
@@ -140,8 +140,6 @@ class TestUserProfileToParams:
         assert params["crop_name"] == "Wheat"
 
 
-# ── is_empty ─────────────────────────────────────────────────────────────────
-
 class TestUserProfileIsEmpty:
     def test_is_empty_on_new_profile(self, tmp_profile):
         profile, _ = tmp_profile
@@ -152,8 +150,6 @@ class TestUserProfileIsEmpty:
         profile.set("personal.mobile", "9876543210")
         assert not profile.is_empty()
 
-
-# ── summary ──────────────────────────────────────────────────────────────────
 
 class TestUserProfileSummary:
     def test_summary_contains_field_names(self, tmp_profile):

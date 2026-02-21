@@ -1,8 +1,8 @@
 """
-VisionHelper — VLM-powered visual element locator for PMFBY Agent.
+VisionHelper — VLM-powered visual element locator.
 
-Uses a Vision Language Model (via NVIDIA NIM API) to visually inspect a
-screenshot and return pixel coordinates of a described UI element.
+Uses a Vision Language Model to visually inspect a screenshot and return
+pixel coordinates of a described UI element.
 
 This is a FALLBACK mechanism — only invoked when standard Playwright
 selectors fail. When used, it's logged clearly in the CLI.
@@ -21,7 +21,7 @@ import re
 import requests
 from dotenv import load_dotenv
 
-from utils import logger
+from . import logger
 
 load_dotenv()
 
@@ -59,12 +59,10 @@ def _parse_coordinates(text: str) -> tuple[int, int] | None:
     Extract (x, y) from VLM response text.
     Looks for the last line matching 'COORDINATES: x,y'.
     """
-    # Find last COORDINATES: line in the response
     matches = re.findall(r"COORDINATES:\s*(\d+)\s*,\s*(\d+)", text, re.IGNORECASE)
     if matches:
         x, y = matches[-1]
         return int(x), int(y)
-    # Check for NOT_FOUND
     if "NOT_FOUND" in text.upper():
         return None
     return None
@@ -74,7 +72,7 @@ def _stream_vlm_response(api_key: str, model: str, api_url: str,
                           image_b64: str, prompt: str, verbose: bool) -> str:
     """
     Make a streaming request to the VLM API and return the accumulated text.
-    Handles thinking tokens from reasoning models (strips <think>...</think>).
+    Handles thinking tokens from reasoning models (strips <think...</think).
     """
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -132,14 +130,13 @@ def _stream_vlm_response(api_key: str, model: str, api_url: str,
                     continue
 
         if verbose:
-            print()  # newline after streaming output
+            print()
 
     except requests.exceptions.RequestException as e:
         logger.error(f"VLM API request failed: {e}")
         return ""
 
-    # Strip thinking tokens if present (reasoning models output <think>...</think>)
-    full_text = re.sub(r"<think>.*?</think>", "", full_text, flags=re.DOTALL).strip()
+    full_text = re.sub(r"<think.*?</think ", "", full_text, flags=re.DOTALL).strip()
     return full_text
 
 
@@ -176,8 +173,7 @@ class VisionHelper:
 
         Args:
             screenshot_path: Path to a PNG screenshot of the current page.
-            description: Human-readable description of the element to find,
-                         e.g. "the State dropdown", "the Calculate button".
+            description: Human-readable description of the element to find.
             page_width, page_height: Browser viewport dimensions for validation.
 
         Returns:
@@ -220,7 +216,6 @@ class VisionHelper:
             return None
 
         x, y = coords
-        # Validate coordinates are within viewport bounds
         if not (0 <= x <= page_width and 0 <= y <= page_height):
             logger.warning(
                 f"👁  Vision Fallback: VLM returned out-of-bounds coords "

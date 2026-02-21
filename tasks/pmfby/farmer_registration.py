@@ -11,9 +11,13 @@ The form lives at /farmerRegistrationForm after clicking:
 import asyncio
 from playwright.async_api import Page
 
-from browser.controller import PMFBYBrowser
-from utils import logger
-from utils.helpers import prompt_user, prompt_confirm
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from shared.browser.controller import Browser
+from shared.utils import logger
+from shared.utils.helpers import prompt_user, prompt_confirm
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -97,7 +101,7 @@ async def _list_nth_select_options(page: Page, select_idx: int) -> list:
 class FarmerRegistrationTask:
     """Handles the farmer registration / crop insurance application flow."""
 
-    def __init__(self, browser: PMFBYBrowser, verbose: bool = False):
+    def __init__(self, browser: Browser, verbose: bool = False):
         self.browser = browser
         self.verbose = verbose
 

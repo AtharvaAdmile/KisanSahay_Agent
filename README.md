@@ -134,7 +134,7 @@ python pmfby_agent.py -p "help me fill the application form" --no-headless
 python pmfby_agent.py -p "calculate premium for wheat in Kharif season, Rajasthan, 5 hectares"
 
 # Check application status
-python pmfby_agent.py -p "check my application status using receipt number ABC123"
+python pmfby_agent.py -p "check my application status using receipt number ABC123" --no-headless
 
 # File a grievance
 python pmfby_agent.py -p "I want to report crop loss" --no-headless
@@ -146,7 +146,7 @@ python pmfby_agent.py -p "explore all pages on the pmfby website" -v
 python pmfby_agent.py -p "open the FAQ page"
 
 # Get scheme information
-python pmfby_agent.py -p "what documents are required for crop insurance?"
+python pmfby_agent.py -p "what documents are required for crop insurance?"  --no-headless
 ```
 
 ---

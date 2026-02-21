@@ -7,13 +7,17 @@ Many internal "links" are React card triggers (JS events), so the real crawlable
 pages are the traditional href-based ones listed in footer and nav.
 """
 
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
 import asyncio
 from collections import deque
 from urllib.parse import urlparse
 
-from browser.controller import PMFBYBrowser
-from utils import logger
-from utils.helpers import save_json, display_table
+from shared.browser.controller import Browser
+from shared.utils import logger
+from shared.utils.helpers import save_json, display_table
 
 # Known crawlable PMFBY pages (confirmed during live exploration)
 KNOWN_PAGES = [
@@ -42,7 +46,7 @@ class SiteExplorerTask:
     MAX_DEPTH = 2
     MAX_PAGES = 20  # conservative to avoid overloading the server
 
-    def __init__(self, browser: PMFBYBrowser, verbose: bool = False):
+    def __init__(self, browser: Browser, verbose: bool = False):
         self.browser = browser
         self.verbose = verbose
         self.visited = set()
