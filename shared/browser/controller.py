@@ -112,13 +112,27 @@ class Browser:
 
     async def select_option(self, selector: str, value: str = None,
                             label: str = None, timeout: int = 10000) -> None:
-        """Select a dropdown option, then delay for AJAX loading."""
+        """Select a dropdown option robustly, handling label/value confusion."""
         logger.debug(f"Selecting option in: {selector}", self.verbose)
         await self.page.wait_for_selector(selector, timeout=timeout)
-        if value:
-            await self.page.select_option(selector, value=value)
-        elif label:
-            await self.page.select_option(selector, label=label)
+        
+        try:
+            if value:
+                # Try selecting by exactly the value specified
+                await self.page.select_option(selector, value=value, timeout=2000)
+            elif label:
+                await self.page.select_option(selector, label=label, timeout=2000)
+        except Exception as e:
+            # Fallback: Sometimes the LLM passes the label string directly to 'value='
+            if value and not label:
+                logger.debug(f"Select by value failed, trying by label '{value}'...")
+                try:
+                    await self.page.select_option(selector, label=value, timeout=2000)
+                except Exception as e2:
+                    logger.warning(f"Failed to select dropdown option: {e2}")
+            else:
+                logger.warning(f"Failed to select dropdown option: {e}")
+                
         await asyncio.sleep(self.config.navigate_delay)
 
     async def wait_for(self, selector: str, timeout: int = 15000) -> None:
@@ -527,57 +541,114 @@ class Browser:
         """
         Extract a structured representation of the currently visible and interactable
         form elements (inputs, selects, buttons) to pass to the ReasoningEngine.
+        Injects a unique data-agent-id into every visible element to guarantee valid selectors
+        even for elements without IDs or names.
         """
         js = """
         () => {
             const isVisible = (elem) => !!( elem.offsetWidth || elem.offsetHeight || elem.getClientRects().length );
             
             const results = [];
+            let counter = 0;
+            
+            const getLabel = (el) => {
+                // 1. Check for 'for' label
+                if (el.id) {
+                    const lbl = document.querySelector(`label[for="${el.id}"]`);
+                    if (lbl) return lbl.innerText.replace('*', '').trim();
+                }
+                // 2. Check parent wrappers (Angular/React structures)
+                let parent = el.parentElement;
+                let depth = 0;
+                while (parent && depth < 3) {
+                    const childLabel = parent.querySelector('label');
+                    if (childLabel) return childLabel.innerText.replace('*', '').trim();
+                    
+                    const prev = parent.previousElementSibling;
+                    if (prev && prev.innerText && prev.innerText.trim().length > 0 && prev.innerText.trim().length < 50) {
+                        return prev.innerText.replace('*', '').trim();
+                    }
+                    parent = parent.parentElement;
+                    depth++;
+                }
+                
+                // 3. Fallback to placeholder or title
+                return el.placeholder || el.title || "";
+            };
             
             // 1. Inputs
             document.querySelectorAll('input:not([type="hidden"])').forEach(el => {
                 if (!isVisible(el) || el.disabled) return;
+                
+                // Skip CAPTCHA text box explicitly if we want to deprioritize, but we just mark it
+                const isCaptcha = el.id.toLowerCase().includes('captcha') || el.name.toLowerCase().includes('captcha') || el.placeholder.toLowerCase().includes('captcha');
+                
+                counter++;
+                el.setAttribute('data-agent-id', `agent-input-${counter}`);
+                
                 results.push({
                     type: "input",
                     inputType: el.type,
-                    id: el.id,
-                    name: el.name,
-                    placeholder: el.placeholder,
-                    value: el.value,
-                    selector: el.id ? `#${el.id}` : (el.name ? `input[name="${el.name}"]` : null)
+                    label: getLabel(el),
+                    placeholder: el.placeholder || "",
+                    value: el.value || "",
+                    isCaptcha: isCaptcha,
+                    selector: `[data-agent-id="agent-input-${counter}"]`
                 });
             });
             
             // 2. Selects
             document.querySelectorAll('select').forEach(el => {
                 if (!isVisible(el) || el.disabled) return;
-                const options = Array.from(el.options)
+                
+                counter++;
+                el.setAttribute('data-agent-id', `agent-select-${counter}`);
+                
+                const rawOptions = Array.from(el.options);
+                const placeholder = rawOptions.length > 0 ? rawOptions[0].text.trim() : "";
+                
+                const options = rawOptions
                     .map(o => ({ value: o.value, text: o.text.trim() }))
-                    .filter(o => o.value && o.text && o.text.toLowerCase() !== "select");
+                    .filter(o => o.value && o.text && o.text.toLowerCase() !== "select" && !o.text.toLowerCase().includes("--select"));
+                
+                let label = getLabel(el);
+                if (!label) label = placeholder;
                 
                 results.push({
                     type: "select",
-                    id: el.id,
-                    name: el.name,
-                    value: el.value,
+                    label: label,
+                    value: el.value || "",
                     options: options,
-                    selector: el.id ? `#${el.id}` : (el.name ? `select[name="${el.name}"]` : null)
+                    selector: `[data-agent-id="agent-select-${counter}"]`
                 });
             });
             
-            // 3. Buttons
-            document.querySelectorAll('button, input[type="submit"], input[type="button"], a.btn').forEach(el => {
+            // 3. Buttons & Radio/Checkboxes
+            document.querySelectorAll('button, input[type="submit"], input[type="button"], a.btn, input[type="radio"], input[type="checkbox"]').forEach(el => {
                 if (!isVisible(el) || el.disabled) return;
-                results.push({
-                    type: "button",
-                    text: el.innerText ? el.innerText.trim() : el.value,
-                    id: el.id,
-                    selector: el.id ? `#${el.id}` : null
-                });
+                
+                counter++;
+                el.setAttribute('data-agent-id', `agent-action-${counter}`);
+                
+                if (el.tagName.toLowerCase() === 'input' && (el.type === 'radio' || el.type === 'checkbox')) {
+                    results.push({
+                        type: el.type,
+                        name: el.name || "",
+                        label: el.nextSibling ? el.nextSibling.textContent.trim() : getLabel(el),
+                        checked: el.checked,
+                        selector: `[data-agent-id="agent-action-${counter}"]`
+                    });
+                } else {
+                    let text = el.innerText ? el.innerText.trim() : (el.value ? el.value.trim() : "");
+                    results.push({
+                        type: "button",
+                        text: text,
+                        selector: `[data-agent-id="agent-action-${counter}"]`
+                    });
+                }
             });
             
-            // Filter out items without a reliable CSS selector
-            return results.filter(r => r.selector !== null);
+            return results;
         }
         """
         try:

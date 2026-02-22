@@ -43,7 +43,6 @@ class PMFBYConfig(SiteConfig):
     def page_urls(self) -> dict[str, str]:
         return {
             "home": "/",
-            "faq": "/faq",
             "contact": "/contact",
             "sitemap": "/sitemap",
             "feedback": "/feedback",
@@ -59,6 +58,7 @@ class PMFBYConfig(SiteConfig):
             "cropic": "/cropic/",
             "guidelines": "/guidelines",
             "farmer_registration": "/farmerRegistrationForm",
+            "self_registration": "/selfRegistration",
         }
 
     @property
@@ -69,8 +69,12 @@ class PMFBYConfig(SiteConfig):
                 params=[],
             ),
             "apply_insurance": IntentDefinition(
-                description="Fill farmer registration / crop insurance form",
+                description="Fill farmer crop insurance application ONLY (NOT account registration)",
                 params=["state", "district", "crop", "season", "area"],
+            ),
+            "register_account": IntentDefinition(
+                description="Create or register a new login user account on PMFBY portal (Self Registration)",
+                params=[],
             ),
             "calculate_premium": IntentDefinition(
                 description="Calculate insurance premium for a crop",
@@ -109,12 +113,8 @@ class PMFBYConfig(SiteConfig):
                 params=[],
             ),
             "navigate_page": IntentDefinition(
-                description="Navigate to a specific page (FAQ, contact, sitemap, etc.)",
+                description="Navigate to a specific page (contact, sitemap, etc.)",
                 params=["page"],
-            ),
-            "get_info": IntentDefinition(
-                description="Get information about the PMFBY scheme, documents, or eligibility",
-                params=[],
             ),
             "setup_profile": IntentDefinition(
                 description="Set up or update the local farmer profile for form pre-filling",
@@ -126,7 +126,8 @@ class PMFBYConfig(SiteConfig):
     def intent_routes(self) -> dict[str, str]:
         return {
             "apply_insurance": "farmer_registration",
-            "calculate_premium": "home",
+            "register_account": "self_registration",
+            "calculate_premium": "premium_calculator",
             "check_status": "home",
             "raise_grievance": "krph",
             "check_complaint": "krph",
@@ -137,7 +138,6 @@ class PMFBYConfig(SiteConfig):
             "access_yestech": "yestech",
             "traverse_site": "home",
             "navigate_page": "home",
-            "get_info": "faq",
             "setup_profile": "home",
         }
 
@@ -197,7 +197,8 @@ class PMFBYConfig(SiteConfig):
 
 Given a user's natural language prompt, classify it into ONE of these intents:
 - traverse_site: exploring the site, listing pages, building a sitemap
-- apply_insurance: filling crop insurance application, farmer registration
+- apply_insurance: filling crop insurance application or scheme registration
+- register_account: creating a new login account / user self registration
 - calculate_premium: calculating insurance premium for a crop/season/area
 - check_status: checking application status with a receipt or policy number
 - raise_grievance: filing complaints, reporting crop loss, KRPH grievance
@@ -207,9 +208,10 @@ Given a user's natural language prompt, classify it into ONE of these intents:
 - upload_crop_photo: upload crop photo via CROPIC portal
 - track_cropic: track crop photo submission status on CROPIC
 - access_yestech: navigate to YES-TECH yield estimation portal
-- navigate_page: opening a specific page (FAQ, contact, sitemap, feedback)
-- get_info: asking about the PMFBY scheme, required documents, eligibility
+- navigate_page: opening a specific page (contact, sitemap, feedback)
 - setup_profile: set up or update the local farmer profile for form auto-filling
+
+CRITICAL RULE: If the user provides specific farming details like "I grow wheat on 2 hectares" or "Kharif crop in Pune", MUST classify as `apply_insurance`!
 
 Also extract any parameters mentioned in the prompt. Common parameters:
 - receipt_number / policy_id: for status checks
@@ -220,7 +222,7 @@ Also extract any parameters mentioned in the prompt. Common parameters:
 - area: area in hectares
 - mobile: mobile phone number
 - reference_id: reference ID for CROPIC tracking
-- page: specific page name (faq, contact, sitemap, feedback, etc.)
+- page: specific page name (contact, sitemap, feedback, etc.)
 
 Respond with ONLY a JSON object (no markdown, no explanation):
 {
@@ -240,6 +242,14 @@ Respond with ONLY a JSON object (no markdown, no explanation):
             {
                 "role": "assistant",
                 "content": '{"intent": "apply_insurance", "params": {}, "confidence": 0.95, "explanation": "User wants to fill the crop insurance application form"}'
+            },
+            {
+                "role": "user",
+                "content": "I grow wheat on a 2 hectare land and want to register."
+            },
+            {
+                "role": "assistant",
+                "content": '{"intent": "apply_insurance", "params": {"crop": "wheat", "area": "2"}, "confidence": 0.98, "explanation": "User provided specific farming details indicating intent to apply."}'
             },
             {
                 "role": "user",
@@ -275,11 +285,11 @@ Respond with ONLY a JSON object (no markdown, no explanation):
             },
             {
                 "role": "user",
-                "content": "open the FAQ page"
+                "content": "open the contact page"
             },
             {
                 "role": "assistant",
-                "content": '{"intent": "navigate_page", "params": {"page": "faq"}, "confidence": 0.96, "explanation": "User wants to navigate to the FAQ page"}'
+                "content": '{"intent": "navigate_page", "params": {"page": "contact"}, "confidence": 0.96, "explanation": "User wants to navigate to the contact page"}'
             },
             {
                 "role": "user",

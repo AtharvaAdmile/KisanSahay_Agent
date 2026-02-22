@@ -10,6 +10,8 @@ Usage:
 
 Endpoints:
     POST /agent/run        — Run the agent with a FarmerProfile + optional prompt
+    POST /agent/chat       — Interactive session with reasoning agent
+    DELETE /agent/session/{session_id} — Close a session and cleanup browser
     GET  /health           — Liveness check
     GET  /intents          — List all supported intents
 """
@@ -18,6 +20,7 @@ import os
 import sys
 import asyncio
 import logging
+import time
 from typing import Optional, Any
 
 # ── Preserve the same sys.path logic as pmfby_agent.py ──────────────────────
@@ -45,8 +48,10 @@ log = logging.getLogger("pmfby_api")
 
 # ── Session Management ─────────────────────────────────────────────────────────
 # In-memory dictionary mapped by session_id.
-# Stores: {"executor": Executor, "task": asyncio.Task, "browser": Browser}
-active_sessions = {}
+# Stores: {"executor": Executor, "browser": Browser, "last_activity": float, "ready_event": Event}
+active_sessions: dict[str, dict] = {}
+
+SESSION_TTL_SECONDS = 600  # 10 minutes idle before cleanup
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 app = FastAPI(
@@ -167,6 +172,7 @@ class ChatRequest(BaseModel):
     message: Optional[str] = Field(None, description="User's answer to the agent's previous question.")
     prompt: Optional[str] = Field(None, description="Initial prompt to start the session (only used if session_id is new).")
     profile: FarmerProfile = Field(default_factory=FarmerProfile, description="Farmer profile data.")
+    forced_intent: Optional[str] = Field(None, description="Explicit intent to skip the parsing LLM.")
     headless: bool = Field(False, description="Run in headless mode (default False for testing).")
 
 
@@ -255,36 +261,87 @@ def _build_default_prompt(farmer: FarmerProfile) -> str:
     )
 
 
+# ── Session Cleanup ──────────────────────────────────────────────────────────
+
+async def _cleanup_session(session_id: str) -> None:
+    """Close the browser and remove a session from active_sessions."""
+    session = active_sessions.pop(session_id, None)
+    if session is None:
+        return
+    browser = session.get("browser")
+    if browser:
+        try:
+            await browser.close()
+            log.info(f"[{session_id}] Browser closed and session cleaned up")
+        except Exception as e:
+            log.warning(f"[{session_id}] Error closing browser: {e}")
+
+
+async def _stale_session_reaper():
+    """Background task that periodically cleans up idle sessions."""
+    while True:
+        await asyncio.sleep(60)  # Check every minute
+        now = time.time()
+        stale_ids = [
+            sid for sid, data in active_sessions.items()
+            if now - data.get("last_activity", now) > SESSION_TTL_SECONDS
+        ]
+        for sid in stale_ids:
+            log.info(f"[{sid}] Session idle for >{SESSION_TTL_SECONDS}s, cleaning up")
+            await _cleanup_session(sid)
+
+
+@app.on_event("startup")
+async def _start_reaper():
+    """Start the stale session reaper on app startup."""
+    asyncio.create_task(_stale_session_reaper())
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
-async def _stateful_agent_worker(session_id: str, prompt: str, profile_data: dict, headless: bool, verbose: bool):
+async def _stateful_agent_worker(
+    session_id: str, prompt: str, profile_data: dict,
+    headless: bool, verbose: bool, forced_intent: str = None,
+    ready_event: asyncio.Event = None
+):
     """Background task to run the agent with ReAct reasoning loops."""
     config = PMFBY_CONFIG
     log.info(f"[{session_id}] Starting stateful worker for prompt: {prompt}")
 
-    parser = IntentParser(config, verbose=verbose)
-    intent_result = parser.parse(prompt)
-    intent = intent_result["intent"]
-    params = intent_result["params"]
-    
-    plan = create_plan_for_intent(config, intent, params)
-    
-    browser = Browser(config, headless=headless, verbose=verbose)
-    executor = Executor(browser, config, verbose=verbose)
-    executor.set_intent(intent)
-    
-    active_sessions[session_id] = {
-        "executor": executor,
-        "browser": browser,
-        "results": {}
-    }
-    
-    await browser.launch()
-    
+    browser = None
     try:
+        if forced_intent:
+            log.info(f"[{session_id}] Bypassing parser. Forced intent: {forced_intent}")
+            intent = forced_intent
+            params = {}
+        else:
+            parser = IntentParser(config, verbose=verbose)
+            intent_result = parser.parse(prompt)
+            intent = intent_result["intent"]
+            params = intent_result["params"]
+
+        plan = create_plan_for_intent(config, intent, params)
+
+        browser = Browser(config, headless=headless, verbose=verbose)
+        executor = Executor(browser, config, verbose=verbose)
+        executor.set_intent(intent)
+
+        active_sessions[session_id] = {
+            "executor": executor,
+            "browser": browser,
+            "last_activity": time.time(),
+            "results": {}
+        }
+
+        # Signal that the session is ready
+        if ready_event:
+            ready_event.set()
+
+        await browser.launch()
+
         # Run the executor. It will block waiting on user_input_queue when yielding.
         results = await executor.execute(plan, profile_data)
-        
+
         # After execution completes, push final success to the output queue
         await executor.agent_output_queue.put({
             "status": "success",
@@ -292,15 +349,24 @@ async def _stateful_agent_worker(session_id: str, prompt: str, profile_data: dic
         })
     except Exception as e:
         log.error(f"[{session_id}] Worker failed: {e}")
-        await executor.agent_output_queue.put({
-            "status": "error",
-            "error": str(e)
-        })
+        session = active_sessions.get(session_id)
+        if session and "executor" in session:
+            await session["executor"].agent_output_queue.put({
+                "status": "error",
+                "error": str(e)
+            })
+        # Ensure ready_event is set even on failure so the caller doesn't hang
+        if ready_event and not ready_event.is_set():
+            ready_event.set()
     finally:
-        # We don't close the browser here if we want the user to see the success state,
-        # but cleanup is typically needed eventually. For now, leave open for manual inspection
-        # or cleanup via a separate DELETE endpoint.
-        pass
+        # Close browser on worker exit to prevent zombie Chromium processes
+        if browser:
+            try:
+                await browser.close()
+                log.info(f"[{session_id}] Browser closed in worker finally block")
+            except Exception as e:
+                log.warning(f"[{session_id}] Error closing browser in finally: {e}")
+
 
 @app.post(
     "/agent/chat",
@@ -316,45 +382,55 @@ async def chat_agent(request: ChatRequest, background_tasks: BackgroundTasks):
     - Resolves by returning the next question (`requires_input`), the final summary (`ready_to_submit`), or `success`.
     """
     session_id = request.session_id or str(uuid.uuid4())
-    
+
     # 1. Start a new session if needed
     if session_id not in active_sessions:
         prompt = request.prompt or _build_default_prompt(request.profile)
         # We convert to a dict to pass to the executor for direct mutation/reading
         profile_data = request.profile.model_dump(exclude_none=True, by_alias=True)
-        
-        # We start the worker in the background
-        # It's better to create an explicit asyncio task so it lives beyond this request cycle
+
+        # Use an asyncio.Event for synchronization instead of arbitrary sleep
+        ready_event = asyncio.Event()
+
         task = asyncio.create_task(
             _stateful_agent_worker(
-                session_id=session_id, 
-                prompt=prompt, 
+                session_id=session_id,
+                prompt=prompt,
                 profile_data=profile_data,
                 headless=request.headless,
-                verbose=True
+                verbose=True,
+                forced_intent=request.forced_intent,
+                ready_event=ready_event,
             )
         )
-        
-        # Wait a moment for the executor to initialize and queue its first output
-        await asyncio.sleep(2)
-        
+
+        # Wait for the worker to register in active_sessions (with timeout)
+        try:
+            await asyncio.wait_for(ready_event.wait(), timeout=30)
+        except asyncio.TimeoutError:
+            return ChatResponse(
+                session_id=session_id,
+                status="error",
+                error="Session initialization timed out after 30 seconds."
+            )
+
         if session_id not in active_sessions:
             return ChatResponse(session_id=session_id, status="error", error="Failed to start session.")
-            
+
     session_data = active_sessions[session_id]
+    session_data["last_activity"] = time.time()
     executor = session_data["executor"]
-    
+
     # 2. Provide the user's message to the paused execution if provided
     if request.message:
         log.info(f"[{session_id}] Sending answer to queue: {request.message}")
         await executor.user_input_queue.put(request.message)
-        
+
     # 3. Wait for the agent to yield its next response
-    # We use asyncio.wait_for to prevent infinite hanging if the agent crashes
     try:
         log.info(f"[{session_id}] Waiting for agent output...")
-        response = await asyncio.wait_for(executor.agent_output_queue.get(), timeout=60.0)
-        
+        response = await asyncio.wait_for(executor.agent_output_queue.get(), timeout=120.0)
+
         return ChatResponse(
             session_id=session_id,
             status=response.get("status"),
@@ -366,10 +442,25 @@ async def chat_agent(request: ChatRequest, background_tasks: BackgroundTasks):
     except asyncio.TimeoutError:
         return ChatResponse(session_id=session_id, status="error", error="Agent timed out waiting for DOM or reasoning.")
 
+
+@app.delete(
+    "/agent/session/{session_id}",
+    tags=["Agent", "Session"],
+    summary="Close a session and cleanup its browser",
+)
+async def delete_session(session_id: str):
+    """Close the browser and remove the session. Prevents zombie Chromium processes."""
+    if session_id not in active_sessions:
+        raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+
+    await _cleanup_session(session_id)
+    return {"status": "ok", "message": f"Session {session_id} cleaned up"}
+
+
 @app.get("/health", tags=["Meta"])
 async def health_check():
     """Liveness check — returns 200 if the server is running."""
-    return {"status": "ok", "service": "PMFBY AI Agent API"}
+    return {"status": "ok", "service": "PMFBY AI Agent API", "active_sessions": len(active_sessions)}
 
 
 @app.get("/intents", tags=["Meta"])
@@ -414,9 +505,6 @@ async def run_agent(request: AgentRequest):
     except Exception as e:
         log.warning(f"Could not persist profile: {e}")
 
-    # Run the async agent — asyncio.to_thread ensures the browser
-    # coroutine runs in its own event loop to avoid conflicts with
-    # the running FastAPI event loop on some platforms.
     try:
         results = await asyncio.wait_for(
             agent_run(prompt, headless=headless, verbose=verbose),

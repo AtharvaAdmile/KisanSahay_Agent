@@ -6,6 +6,11 @@ KEY FINDING: All form elements on the registration form lack 'id' and 'name'
 attributes. Selectors MUST use nth() index-based addressing.
 The form lives at /farmerRegistrationForm after clicking:
   Homepage → "Farmer Corner" card (index 0) → "Guest Farmer" button
+
+API COMPATIBLE: Uses queue-based I/O instead of CLI stdin. Each field is
+checked against the profile first; if missing, an ASK_USER message is
+yielded to the executor's output queue and the handler awaits the answer
+from the input queue.
 """
 
 import asyncio
@@ -17,10 +22,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from shared.browser.controller import Browser
 from shared.utils import logger
-from shared.utils.helpers import prompt_user, prompt_confirm
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
+
+USER_INPUT_TIMEOUT = 300  # 5 minutes max wait for user answer
+
 
 async def _wait_for_options(page: Page, select_idx: int,
                             min_count: int = 2, timeout_ms: int = 12000) -> None:
@@ -96,6 +103,53 @@ async def _list_nth_select_options(page: Page, select_idx: int) -> list:
         return []
 
 
+# ── Queue-based I/O ────────────────────────────────────────────────────────
+
+async def _ask_user(output_queue: asyncio.Queue, input_queue: asyncio.Queue,
+                    question: str, options: list = None) -> str:
+    """
+    Yield an ASK_USER message to the output queue and wait for the user's
+    answer from the input queue. Used as a drop-in replacement for prompt_user().
+    """
+    msg = {
+        "status": "requires_input",
+        "question": question,
+        "options": options or []
+    }
+    await output_queue.put(msg)
+    logger.info(f"Asking user: {question}")
+
+    try:
+        answer = await asyncio.wait_for(input_queue.get(), timeout=USER_INPUT_TIMEOUT)
+    except asyncio.TimeoutError:
+        logger.error(f"User input timed out for: {question}")
+        raise TimeoutError(f"No user response within {USER_INPUT_TIMEOUT}s for: {question}")
+
+    logger.info(f"User answered: {answer}")
+    return str(answer).strip()
+
+
+async def _ask_confirm(output_queue: asyncio.Queue, input_queue: asyncio.Queue,
+                       question: str) -> bool:
+    """
+    Yield a yes/no confirmation question and return True if the user confirms.
+    """
+    answer = await _ask_user(output_queue, input_queue, question, options=["Yes", "No"])
+    return answer.lower() in ("yes", "y", "true", "1")
+
+
+def _get_profile_value(profile: dict, *keys) -> str:
+    """
+    Look up a value from the profile dict, trying multiple key names.
+    Returns the first non-empty match, or empty string.
+    """
+    for key in keys:
+        val = profile.get(key, "")
+        if val:
+            return str(val)
+    return ""
+
+
 # ── Main Task Handler ───────────────────────────────────────────────────────
 
 class FarmerRegistrationTask:
@@ -105,13 +159,32 @@ class FarmerRegistrationTask:
         self.browser = browser
         self.verbose = verbose
 
-    async def fill_form(self, **pre_params) -> dict:
+    async def fill_form(self, executor=None, profile: dict = None, **pre_params) -> dict:
         """
         Navigate to farmer registration form via:
           Homepage → Farmer Corner card → Guest Farmer button → /farmerRegistrationForm
 
         Then fill fields using nth() index selectors (no id/name attributes on form).
+
+        Args:
+            executor: The Executor instance (provides user_input_queue and agent_output_queue)
+            profile: Dict of farmer profile data to auto-fill from
+            **pre_params: Additional pre-filled parameters
         """
+        # Set up I/O queues — either from executor or create standalone (for testing)
+        if executor:
+            output_q = executor.agent_output_queue
+            input_q = executor.user_input_queue
+        else:
+            output_q = asyncio.Queue()
+            input_q = asyncio.Queue()
+
+        if profile is None:
+            profile = {}
+
+        # Merge pre_params into profile (pre_params take precedence)
+        merged = {**profile, **pre_params}
+
         logger.section("Farmer Registration — Crop Insurance Application")
         logger.info("Navigating: Homepage → Farmer Corner → Guest Farmer")
 
@@ -152,6 +225,21 @@ class FarmerRegistrationTask:
         logger.info("Fill mode: Using nth() index selectors — per live exploration, "
                     "form has NO id/name attributes.\n")
 
+        # ── Helper: get value from profile or ask user ───────────────────
+        async def _get_or_ask(question: str, *profile_keys, options: list = None, default: str = "") -> str:
+            """Check profile for value, ask user if missing."""
+            value = _get_profile_value(merged, *profile_keys)
+            if value:
+                logger.info(f"  Auto-filling from profile: {question} = {value[:30]}")
+                return value
+            if default:
+                # Ask with default hint
+                full_q = f"{question} (default: {default})"
+            else:
+                full_q = question
+            answer = await _ask_user(output_q, input_q, full_q, options=options)
+            return answer or default
+
         # ── Step 1: Scheme & Season Selection ─────────────────────────────
         logger.section("Step 1: Scheme, Season & Year")
 
@@ -159,7 +247,7 @@ class FarmerRegistrationTask:
         state_opts = await _list_nth_select_options(page, 0)
         if state_opts:
             logger.info(f"States available ({len(state_opts)}): {', '.join(state_opts[:5])}...")
-        state = pre_params.get("state") or prompt_user("Your State")
+        state = await _get_or_ask("Your State", "state", options=state_opts[:20] if state_opts else None)
         if state:
             await self.browser.vision_select(0, state, "State dropdown (first select on page)")
             await _wait_for_options(page, 1)  # Wait for Scheme to load
@@ -168,7 +256,11 @@ class FarmerRegistrationTask:
         scheme_opts = await _list_nth_select_options(page, 1)
         if scheme_opts:
             logger.info(f"Schemes: {', '.join(scheme_opts)}")
-        scheme = prompt_user("Scheme (e.g., PMFBY)", default=scheme_opts[0] if scheme_opts else "")
+        scheme = await _get_or_ask(
+            "Scheme (e.g., PMFBY)", "scheme",
+            options=scheme_opts if scheme_opts else None,
+            default=scheme_opts[0] if scheme_opts else ""
+        )
         if scheme:
             await self.browser.vision_select(1, scheme, "Scheme dropdown (second select)")
             await _wait_for_options(page, 2)
@@ -177,7 +269,7 @@ class FarmerRegistrationTask:
         season_opts = await _list_nth_select_options(page, 2)
         if season_opts:
             logger.info(f"Seasons: {', '.join(season_opts)}")
-        season = pre_params.get("season") or prompt_user("Season (Kharif/Rabi/Zaid)")
+        season = await _get_or_ask("Season (Kharif/Rabi/Zaid)", "season", options=season_opts if season_opts else None)
         if season:
             await self.browser.vision_select(2, season, "Season dropdown (Kharif / Rabi / Zaid)")
             await asyncio.sleep(2)
@@ -186,7 +278,7 @@ class FarmerRegistrationTask:
         year_opts = await _list_nth_select_options(page, 3)
         if year_opts:
             logger.info(f"Years: {', '.join(year_opts[:5])}")
-        year = pre_params.get("year") or prompt_user("Year", default="2025")
+        year = await _get_or_ask("Year", "crop_year", "year", options=year_opts[:5] if year_opts else None, default="2025")
         if year:
             await self.browser.vision_select(3, year, "Year dropdown")
             await asyncio.sleep(2)
@@ -194,11 +286,14 @@ class FarmerRegistrationTask:
         # ── Step 2: Farmer Details ────────────────────────────────────────
         logger.section("Step 2: Farmer Details")
 
-        full_name = prompt_user("Full Name of Farmer")
+        full_name = await _get_or_ask("Full Name of Farmer", "full_name", "name")
         if full_name:
             await _fill_nth_input(page, 4, full_name)
 
-        passbook_name = prompt_user("Passbook Name (as in bank passbook)")
+        passbook_name = await _get_or_ask("Passbook Name (as in bank passbook)", "passbook_name")
+        if not passbook_name and full_name:
+            passbook_name = full_name  # Sensible default
+            logger.info(f"  Using full name as passbook name: {passbook_name}")
         if passbook_name:
             await _fill_nth_input(page, 5, passbook_name)
 
@@ -206,19 +301,22 @@ class FarmerRegistrationTask:
         rel_opts = await _list_nth_select_options(page, 6)
         if rel_opts:
             logger.info(f"Relationship: {', '.join(rel_opts)}")
-        relationship = prompt_user("Relationship (S/O / D/O / W/O / C/O)", default="S/O")
+        relationship = await _get_or_ask(
+            "Relationship (S/O / D/O / W/O / C/O)", "relationship",
+            options=rel_opts if rel_opts else None, default="S/O"
+        )
         if relationship:
             await _select_nth_by_label(page, 6, relationship)
 
-        relative_name = prompt_user("Father / Husband Name")
+        relative_name = await _get_or_ask("Father / Husband Name", "relative_name")
         if relative_name:
             await _fill_nth_input(page, 7, relative_name)
 
-        mobile = prompt_user("Mobile Number (10 digits)")
+        mobile = await _get_or_ask("Mobile Number (10 digits)", "mobile")
         if mobile:
             await _fill_nth_input(page, 8, mobile)
 
-        age = prompt_user("Age")
+        age = await _get_or_ask("Age", "age")
         if age:
             await _fill_nth_input(page, 9, age)
 
@@ -226,7 +324,10 @@ class FarmerRegistrationTask:
         caste_opts = await _list_nth_select_options(page, 10)
         if caste_opts:
             logger.info(f"Caste options: {', '.join(caste_opts)}")
-        caste = prompt_user("Caste Category", default="GENERAL")
+        caste = await _get_or_ask(
+            "Caste Category", "caste", "category",
+            options=caste_opts if caste_opts else None, default="GENERAL"
+        )
         if caste:
             await self.browser.vision_select(10, caste, "Caste Category dropdown (GENERAL/OBC/SC/ST)")
 
@@ -234,7 +335,10 @@ class FarmerRegistrationTask:
         gender_opts = await _list_nth_select_options(page, 11)
         if gender_opts:
             logger.info(f"Gender options: {', '.join(gender_opts)}")
-        gender = prompt_user("Gender")
+        gender = await _get_or_ask(
+            "Gender", "gender",
+            options=gender_opts if gender_opts else None
+        )
         if gender:
             await self.browser.vision_select(11, gender, "Gender dropdown (Male/Female/Others)")
 
@@ -242,7 +346,10 @@ class FarmerRegistrationTask:
         ftype_opts = await _list_nth_select_options(page, 12)
         if ftype_opts:
             logger.info(f"Farmer Types: {', '.join(ftype_opts)}")
-        farmer_type = prompt_user("Farmer Type (Small/Marginal/Others)", default="Small")
+        farmer_type = await _get_or_ask(
+            "Farmer Type (Small/Marginal/Others)", "farmer_type",
+            options=ftype_opts if ftype_opts else None, default="Small"
+        )
         if farmer_type:
             await self.browser.vision_select(12, farmer_type, "Farmer Type dropdown")
 
@@ -250,7 +357,10 @@ class FarmerRegistrationTask:
         fcat_opts = await _list_nth_select_options(page, 13)
         if fcat_opts:
             logger.info(f"Farmer Categories: {', '.join(fcat_opts)}")
-        farmer_cat = prompt_user("Farmer Category (Owner/Tenant/Share Cropper)", default="Owner")
+        farmer_cat = await _get_or_ask(
+            "Farmer Category (Owner/Tenant/Share Cropper)", "farmer_category",
+            options=fcat_opts if fcat_opts else None, default="Owner"
+        )
         if farmer_cat:
             await self.browser.vision_select(13, farmer_cat, "Farmer Category dropdown (Owner/Tenant/Share Cropper)")
 
@@ -261,42 +371,53 @@ class FarmerRegistrationTask:
             if await verify_btn.count() > 0:
                 await verify_btn.first.click()
                 logger.warning("OTP sent to your mobile number.")
-                await self.browser.handoff_to_user(
-                    "Enter the OTP in the browser, then type 'continue' here."
+                otp = await _ask_user(
+                    output_q, input_q,
+                    "An OTP has been sent to your mobile number. Please enter the OTP."
                 )
+                if otp:
+                    # Try to find and fill the OTP input field
+                    try:
+                        otp_input = page.locator("input[placeholder*='OTP'], input[placeholder*='otp']")
+                        if await otp_input.count() > 0:
+                            await otp_input.first.fill(otp)
+                            await asyncio.sleep(2)
+                    except Exception:
+                        logger.warning("Could not auto-fill OTP, user may need to enter manually")
         except Exception as e:
             logger.warning(f"Verify button not found or click failed: {e}")
-            await self.browser.handoff_to_user(
-                "Please verify your mobile number in the browser, then type 'continue'."
+            await _ask_user(
+                output_q, input_q,
+                "Please verify your mobile number in the browser manually, then send 'continue'."
             )
 
         # ── Step 4: Residential Details ───────────────────────────────────
-        logger.section("Step 4: Residential  Details")
+        logger.section("Step 4: Residential Details")
 
-        res_state = prompt_user("Residential State", default=state or "")
+        res_state = await _get_or_ask("Residential State", "state", default=state or "")
         if res_state:
             await self.browser.vision_select(14, res_state, "Residential State dropdown")
             await _wait_for_options(page, 15)  # Wait for District
 
-        res_district = prompt_user("District")
+        res_district = await _get_or_ask("District", "district")
         if res_district:
             await self.browser.vision_select(15, res_district, "Residential District dropdown")
             await _wait_for_options(page, 16)  # Wait for Sub-District
 
-        res_sub = prompt_user("Sub-District / Tehsil")
+        res_sub = await _get_or_ask("Sub-District / Tehsil", "taluka", "sub_district")
         if res_sub:
             await self.browser.vision_select(16, res_sub, "Sub-District or Tehsil dropdown")
             await _wait_for_options(page, 17)  # Wait for Village
 
-        res_village = prompt_user("Village / Town")
+        res_village = await _get_or_ask("Village / Town", "village")
         if res_village:
             await self.browser.vision_select(17, res_village, "Village or Town dropdown")
 
-        address = prompt_user("Full Address")
+        address = await _get_or_ask("Full Address", "address")
         if address:
             await _fill_nth_input(page, 18, address)
 
-        pincode = prompt_user("PIN Code")
+        pincode = await _get_or_ask("PIN Code", "pincode")
         if pincode:
             await _fill_nth_input(page, 19, pincode)
 
@@ -304,39 +425,37 @@ class FarmerRegistrationTask:
         logger.section("Step 5: Farmer ID (Aadhaar)")
 
         # ID Type (index 20) — usually pre-set to UID/Aadhaar
-        id_num = prompt_user("Aadhaar Number (12 digits)")
+        id_num = await _get_or_ask("Aadhaar Number (12 digits)", "aadhaar", "aadhaarNumber")
         if id_num:
             await _fill_nth_input(page, 21, id_num)
 
         # ── Step 6: Bank Account Details ──────────────────────────────────
         logger.section("Step 6: Bank Account Details")
 
-        bank_state = prompt_user("Bank State", default=state or "")
+        bank_state = await _get_or_ask("Bank State", "bank_state", default=state or "")
         if bank_state:
             await self.browser.vision_select(25, bank_state, "Bank State dropdown")
             await _wait_for_options(page, 26, timeout_ms=10000)
 
-        bank_district = prompt_user("Bank District")
+        bank_district = await _get_or_ask("Bank District", "bank_district")
         if bank_district:
             await self.browser.vision_select(26, bank_district, "Bank District dropdown")
             await _wait_for_options(page, 27, timeout_ms=10000)
 
-        bank_name = prompt_user("Bank Name")
+        bank_name = await _get_or_ask("Bank Name", "bank_name")
         if bank_name:
             await self.browser.vision_select(27, bank_name, "Bank Name dropdown")
             await _wait_for_options(page, 28, timeout_ms=10000)
 
-        branch = prompt_user("Bank Branch")
+        branch = await _get_or_ask("Bank Branch", "bank_branch")
         if branch:
             await self.browser.vision_select(28, branch, "Bank Branch dropdown")
 
-        acc_no = prompt_user("Bank Account Number")
+        acc_no = await _get_or_ask("Bank Account Number", "account_no")
         if acc_no:
             await _fill_nth_input(page, 29, acc_no)
-
-        confirm_acc = prompt_user("Confirm Account Number")
-        if confirm_acc:
-            await _fill_nth_input(page, 30, confirm_acc)
+            # Auto-fill confirm field with same value
+            await _fill_nth_input(page, 30, acc_no)
 
         # ── Step 7: CAPTCHA ───────────────────────────────────────────────
         logger.section("Step 7: CAPTCHA")
@@ -344,18 +463,38 @@ class FarmerRegistrationTask:
             cap_visible = await page.is_visible("input[placeholder*='Captcha'], input[placeholder*='captcha']")
             if cap_visible:
                 await self.browser.screenshot("captcha_farmer_reg")
-                await self.browser.handoff_to_user(
-                    "Please solve the CAPTCHA shown in the browser, then type 'continue'."
+                captcha = await _ask_user(
+                    output_q, input_q,
+                    "Please enter the CAPTCHA shown in the form."
                 )
+                if captcha:
+                    try:
+                        captcha_input = page.locator("input[placeholder*='Captcha'], input[placeholder*='captcha']")
+                        if await captcha_input.count() > 0:
+                            await captcha_input.first.fill(captcha)
+                    except Exception:
+                        logger.warning("Could not auto-fill CAPTCHA")
         except Exception:
             pass
 
         # ── Step 8: Review & Submit ───────────────────────────────────────
         logger.section("Review & Submit")
         await self.browser.screenshot("form_filled_preview")
-        logger.info("Screenshot saved — review the completed form in the browser.")
+        logger.info("Screenshot saved — review the completed form.")
 
-        if prompt_confirm("Submit the form?", default=False):
+        # Yield ready_to_submit with a summary so the user can confirm
+        summary = {
+            "name": full_name, "mobile": mobile, "age": age,
+            "state": state, "district": res_district,
+            "season": season, "year": year,
+        }
+        await output_q.put({
+            "status": "ready_to_submit",
+            "summary": {k: v for k, v in summary.items() if v}
+        })
+
+        confirm_answer = await _ask_user(output_q, input_q, "Submit the form? (Yes/No)", options=["Yes", "No"])
+        if confirm_answer.lower() in ("yes", "y", "true", "1"):
             try:
                 submit = page.locator("button:has-text('Create User'), button[type='submit']").first
                 await submit.click()
@@ -364,11 +503,12 @@ class FarmerRegistrationTask:
                 logger.success("Form submitted. Check browser for confirmation.")
             except Exception as e:
                 logger.error(f"Submit failed: {e}")
-                await self.browser.handoff_to_user(
-                    "Please submit the form manually, then type 'continue'."
+                await _ask_user(
+                    output_q, input_q,
+                    "Form submission failed. Please submit manually in the browser, then send 'continue'."
                 )
         else:
-            logger.info("Submission cancelled.")
+            logger.info("Submission cancelled by user.")
 
         body = await self.browser.get_text("body")
         return {

@@ -90,7 +90,7 @@ class IntentParser:
                 raise ValueError("LLM returned empty (None) content")
                 
             raw = content.strip()
-            logger.debug(f"LLM raw response: {raw}", self.verbose)
+            logger.info(f"\n[BACKEND] Intent Parser LLM Raw Response:\n{raw}\n")
 
         except Exception as e:
             logger.error(f"LLM call failed: {e}")

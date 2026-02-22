@@ -92,6 +92,18 @@ def create_plan_for_intent(config: SiteConfig, intent: str, params: dict) -> lis
             "method": method_name,
             "params": params,
         })
+    elif intent in ["register_account", "calculate_premium"]:
+        if intent == "calculate_premium":
+            base_plan.extend([
+                {
+                    "action": "click",
+                    "selector": "#ciList > li.farmerCardList.card-1.newHeader__card1___3F634",
+                    "vision": True,
+                    "description": "Insurance Premium Calculator card button"
+                },
+                {"action": "wait", "seconds": 2}
+            ])
+        base_plan.append({"action": "agentic_loop"})
     else:
         base_plan.append({"action": "extract_page_info"})
     
@@ -112,7 +124,7 @@ def _get_handler_for_intent(config: SiteConfig, intent: str) -> str | None:
         "access_kcc": "kcc_access",
         "access_aif": "aif_access",
         "apply_insurance": "farmer_registration",
-        "calculate_premium": "premium_calculator",
+        # "calculate_premium": "premium_calculator", # Handled via generic agentic_loop now
         "check_status": "application_status",
         "raise_grievance": "grievance",
         "check_complaint": "grievance",
@@ -139,7 +151,7 @@ def _get_method_for_intent(intent: str) -> str:
         "access_kcc": "access_kcc",
         "access_aif": "access_aif",
         "apply_insurance": "fill_form",
-        "calculate_premium": "calculate",
+        # "calculate_premium": "calculate", # Handled via generic agentic_loop now
         "check_status": "check_status",
         "raise_grievance": "file_grievance",
         "check_complaint": "check_complaint_status",

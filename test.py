@@ -1,26 +1,24 @@
-from openai import OpenAI
+import requests, os
 
-client = OpenAI(
-  base_url = "https://integrate.api.nvidia.com/v1",
-  api_key = "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"
+api_key = "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"
+invoke_url = "https://integrate.api.nvidia.com/v1/chat/completions"
 
-)
+headers = {
+  "Authorization": f"Bearer {api_key}",
+  "Accept": "application/json"
+}
 
-completion = client.chat.completions.create(
-  model="sarvamai/sarvam-m",
-  messages=[{"role":"user","content":"what is a LLM model?"}],
-  temperature=1,
-  top_p=1,
-  max_tokens=4096,
-  stream=True
-)
+payload = {
+  "model": "nvidia/nemotron-nano-12b-v2-vl",
+  "messages": [
+    {"role": "system", "content": "/think"},
+    {"role": "user", "content": [{"type": "text", "text": "hello there"}]}
+  ],
+  "max_tokens": 1024,
+  "temperature": 1.00,
+  "top_p": 1.00
+}
 
-for chunk in completion:
-  if not getattr(chunk, "choices", None):
-    continue
-  reasoning = getattr(chunk.choices[0].delta, "reasoning_content", None)
-  if reasoning:
-    print(reasoning, end="")
-  if chunk.choices and chunk.choices[0].delta.content is not None:
-    print(chunk.choices[0].delta.content, end="")
+response = requests.post(invoke_url, headers=headers, json=payload)
+print(response.json())
 

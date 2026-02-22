@@ -84,116 +84,16 @@ def _smart_match(label: str, options: list[str]) -> str | None:
 
     return None
 
+# ── Hardcoded Selectors for Calculation fields ──────────────────────────────
 
-# ── Modal select helpers ────────────────────────────────────────────────────
-
-_MODAL_SEL = ".modal-body select, [class*='InnerCalculator'] select"
-
-
-async def _get_modal_options(page: Page, idx: int) -> list[str]:
-    """Return text options for modal's Nth select (excluding placeholder 'Select')."""
-    try:
-        js = f"""
-        (() => {{
-            const sels = document.querySelectorAll("{_MODAL_SEL}");
-            const sel = sels[{idx}];
-            if (!sel) return [];
-            return Array.from(sel.options)
-                .map(o => o.text.trim())
-                .filter(t => t && t.toLowerCase() !== 'select' && t !== '--Select--');
-        }})()
-        """
-        return await page.evaluate(js)
-    except Exception:
-        return []
-
-
-async def _wait_modal_populated(page: Page, idx: int,
-                                 min_count: int = 2, timeout_ms: int = 15000) -> bool:
-    """Wait for modal select[idx] to have at least min_count options. Returns success bool."""
-    try:
-        await page.wait_for_function(
-            f"""
-            (() => {{
-                const sels = document.querySelectorAll("{_MODAL_SEL}");
-                const sel = sels[{idx}];
-                return sel && sel.options.length >= {min_count};
-            }})()
-            """,
-            timeout=timeout_ms,
-        )
-        return True
-    except Exception:
-        return False
-
-
-async def _select_modal_by_label(page: Page, idx: int, label: str) -> str | None:
-    """
-    Select option in modal select[idx] using smart_match.
-    Returns the matched option text, or None if no match found.
-    """
-    opts = await _get_modal_options(page, idx)
-    matched = _smart_match(label, opts)
-    if not matched:
-        return None
-
-    js = f"""
-    (function() {{
-        const sels = document.querySelectorAll("{_MODAL_SEL}");
-        const sel = sels[{idx}];
-        if (!sel) return false;
-        const opts = Array.from(sel.options);
-        const match = opts.find(o => o.text.trim() === {repr(matched)});
-        if (match) {{
-            sel.value = match.value;
-            sel.dispatchEvent(new Event('change', {{bubbles: true}}));
-            return true;
-        }}
-        return false;
-    }})()
-    """
-    try:
-        ok = await page.evaluate(js)
-        if ok:
-            await asyncio.sleep(3)
-        return matched if ok else None
-    except Exception:
-        return None
-
-
-async def _select_required(page: Page, idx: int, label: str,
-                            field_name: str, wait_next: int | None = None) -> str:
-    """
-    Select a required field. Raises TaskAbortError if selection fails.
-    Optionally waits for the next dropdown (wait_next index) to populate.
-    Returns the matched option text.
-    """
-    opts = await _get_modal_options(page, idx)
-    if not opts:
-        raise TaskAbortError(
-            f"Required field '{field_name}' has no options available — "
-            "the previous cascade selection may have failed."
-        )
-
-    matched = await _select_modal_by_label(page, idx, label)
-    if matched is None:
-        raise TaskAbortError(
-            f"Could not select '{label}' for field '{field_name}'.\n"
-            f"Available options ({len(opts)}): {', '.join(opts[:10])}"
-            + ("..." if len(opts) > 10 else "")
-        )
-
-    logger.success(f"  Selected {field_name}: {matched}")
-
-    if wait_next is not None:
-        populated = await _wait_modal_populated(page, wait_next)
-        if not populated:
-            raise TaskAbortError(
-                f"Field '{field_name}' was selected but the next dropdown "
-                f"(select[{wait_next}]) did not populate — page may not have responded."
-            )
-
-    return matched
+SEL_SEASON = "#app > div > div:nth-child(1) > div > div.newHeader__headerMain___3js6e > div.newHeader__cardsMenu___1Sgs1.container-fluid > div > div:nth-child(1) > div > div.newHeader__modalInnerOverlay___2U5R2 > div > div > div > div > div.newHeader__InnerCalculator___1YK6V.modal-body > form > div > div > div:nth-child(1) > div > select"
+SEL_YEAR = "#app > div > div:nth-child(1) > div > div.newHeader__headerMain___3js6e > div.newHeader__cardsMenu___1Sgs1.container-fluid > div > div:nth-child(1) > div > div.newHeader__modalInnerOverlay___2U5R2 > div > div > div > div > div.newHeader__InnerCalculator___1YK6V.modal-body > form > div > div > div:nth-child(2) > div > select"
+SEL_SCHEME = "#app > div > div:nth-child(1) > div > div.newHeader__headerMain___3js6e > div.newHeader__cardsMenu___1Sgs1.container-fluid > div > div:nth-child(1) > div > div.newHeader__modalInnerOverlay___2U5R2 > div > div > div > div > div.newHeader__InnerCalculator___1YK6V.modal-body > form > div > div > div:nth-child(3) > div > select"
+SEL_STATE = "#app > div > div:nth-child(1) > div > div.newHeader__headerMain___3js6e > div.newHeader__cardsMenu___1Sgs1.container-fluid > div > div:nth-child(1) > div > div.newHeader__modalInnerOverlay___2U5R2 > div > div > div > div > div.newHeader__InnerCalculator___1YK6V.modal-body > form > div > div > div:nth-child(4) > div > select"
+SEL_DISTRICT = "#app > div > div:nth-child(1) > div > div.newHeader__headerMain___3js6e > div.newHeader__cardsMenu___1Sgs1.container-fluid > div > div:nth-child(1) > div > div.newHeader__modalInnerOverlay___2U5R2 > div > div > div > div > div.newHeader__InnerCalculator___1YK6V.modal-body > form > div > div > div:nth-child(5) > div > select"
+SEL_CROP = "xpath=//*[@id=\"app\"]/div/div[1]/div/div[2]/div[3]/div/div[1]/div/div[3]/div/div/div/div/div[2]/form/div/div/div[6]/div/select"
+SEL_AREA = "#app > div > div:nth-child(1) > div > div.newHeader__headerMain___3js6e > div.newHeader__cardsMenu___1Sgs1.container-fluid > div > div:nth-child(1) > div > div.newHeader__modalInnerOverlay___2U5R2 > div > div > div > div > div.newHeader__InnerCalculator___1YK6V.modal-body > form > div > div > div:nth-child(7) > div > input"
+SEL_CALCULATE = "#app > div > div:nth-child(1) > div > div.newHeader__headerMain___3js6e > div.newHeader__cardsMenu___1Sgs1.container-fluid > div > div:nth-child(1) > div > div.newHeader__modalInnerOverlay___2U5R2 > div > div > div > div > div.newHeader__cardFooter___1P8JE.modal-footer > div > button:nth-child(2)"
 
 
 # ── Main Task Handler ───────────────────────────────────────────────────────
@@ -205,15 +105,86 @@ class PremiumCalculatorTask:
         self.browser = browser
         self.verbose = verbose
 
+    async def _ask_sahayak(self, executor, question: str, options: list = None) -> str:
+        """Uses executor queues to ask frontend Sahayak and get user response."""
+        if not executor:
+            if options:
+                logger.info(f"Available options: {options}")
+            return prompt_user(question)
+        
+        await executor.agent_output_queue.put({
+            "status": "requires_input",
+            "question": question,
+            "options": options or []
+        })
+        answer = await executor._await_user_input()
+        return answer
+
+    async def _get_options_for_selector(self, page: Page, selector: str) -> list[str]:
+        """Return text options for a specific select element."""
+        try:
+            options = await page.locator(selector).locator("option").evaluate_all(
+                "opts => opts.map(o => o.textContent.trim()).filter(t => t && t.toLowerCase() !== 'select' && t !== '--Select--')"
+            )
+            return options
+        except Exception:
+            return []
+
+    async def _wait_selector_populated(self, page: Page, selector: str, min_count: int = 2) -> bool:
+        """Wait for specific select to have at least min_count options."""
+        try:
+            for _ in range(30):
+                count = await page.locator(selector).locator("option").count()
+                if count >= min_count:
+                    return True
+                await asyncio.sleep(0.5)
+            return False
+        except Exception:
+            return False
+
+    async def _select_by_selector_label(self, page: Page, selector: str, label: str) -> str | None:
+        """
+        Select option in specific select using smart_match.
+        Returns the matched option text, or None if no match found.
+        """
+        opts = await self._get_options_for_selector(page, selector)
+        if not opts:
+            return None
+            
+        matched = _smart_match(label, opts)
+        if not matched:
+            return None
+
+        try:
+            # Playwright select_option automatically dispatches 'change' and handles matching
+            await page.locator(selector).select_option(label=matched)
+            await asyncio.sleep(2)
+            return matched
+        except Exception:
+            try:
+                # Fallback to value if label matching fails
+                await page.locator(selector).select_option(value=matched)
+                await asyncio.sleep(2)
+                return matched
+            except Exception:
+                return None
+            
+    async def _select_required(self, page: Page, selector: str, label: str, field_name: str) -> str:
+        matched = await self._select_by_selector_label(page, selector, label)
+        if not matched:
+            opts = await self._get_options_for_selector(page, selector)
+            raise TaskAbortError(
+                f"Could not select '{label}' for field '{field_name}'.\n"
+                f"Available options ({len(opts)}): {', '.join(opts[:10])}..."
+            )
+        logger.success(f"  Selected {field_name}: {matched}")
+        return matched
+
     async def calculate(self, **pre_params) -> dict:
         """
-        Open the Premium Calculator modal on the homepage and fill cascading dropdowns.
+        Open the Premium Calculator modal on the homepage and fill cascading dropdowns using interactive mode.
 
-        Auto-selects all fields using params extracted from the user's prompt.
-        Only asks for user input when a field is genuinely not specified.
-        Aborts with a clear message on any required selection failure.
-
-        Modal cascade order: Season[0] → Year[1] → Scheme[2] → State[3] → District[4] → Crop[5]
+        Modal cascade order: Season → Year → Scheme → State → District → Crop
         """
         logger.section("Insurance Premium Calculator")
         logger.info("Opening the premium calculator modal on the homepage.\n")
@@ -243,7 +214,7 @@ class PremiumCalculatorTask:
             logger.warning("Modal selector timeout — proceeding anyway")
 
         # Confirm first dropdown is ready
-        if not await _wait_modal_populated(page, 0):
+        if not await self._wait_selector_populated(page, SEL_SEASON):
             return self._abort("Modal did not load its dropdowns in time.")
 
         try:
@@ -259,78 +230,72 @@ class PremiumCalculatorTask:
 
     async def _fill_and_calculate(self, page: Page, params: dict) -> dict:
         """Fill modal dropdowns, click Calculate, extract result."""
+        executor = params.get("executor")
+        profile = params.get("profile", {})
+        
+        # ── Season ────────────────────────────────────────────────────────
+        season_opts = await self._get_options_for_selector(page, SEL_SEASON)
+        season_raw = await self._ask_sahayak(executor, "Please pick a season for insurance premium calculation.", season_opts)
+        season = await self._select_required(page, SEL_SEASON, season_raw, "Season")
 
-        # ── Season (index 0) — Required: 'season' from prompt ────────────
-        season_raw = params.get("season", "")
-        if not season_raw:
-            # Only ask user if genuinely not in prompt
-            opts = await _get_modal_options(page, 0)
-            logger.info(f"Seasons available: {opts}")
-            season_raw = prompt_user("Season (Kharif / Rabi)")
+        await self._wait_selector_populated(page, SEL_YEAR)
 
-        season = await _select_required(
-            page, 0, season_raw, "Season", wait_next=1
-        )
+        # ── Year ──────────────────────────────────────────────────────────
+        year_opts = await self._get_options_for_selector(page, SEL_YEAR)
+        year_raw = await self._ask_sahayak(executor, "Please pick a year.", year_opts)
+        year = await self._select_required(page, SEL_YEAR, year_raw, "Year")
 
-        # ── Year (index 1) — Default to 2025 unless specified ────────────
-        year_raw = params.get("year", "2025")
-        year = await _select_required(page, 1, year_raw, "Year", wait_next=2)
+        await self._wait_selector_populated(page, SEL_SCHEME)
 
-        # ── Scheme (index 2) — Auto-pick PMFBY default if not specified ──
-        scheme_opts = await _get_modal_options(page, 2)
-        logger.info(f"Schemes available: {scheme_opts}")
-        scheme_raw = params.get("scheme", "")
-        if not scheme_raw:
-            # Default to the first scheme (usually PMFBY) without prompting
-            scheme_raw = scheme_opts[0] if scheme_opts else "PMFBY"
-            logger.info(f"No scheme in prompt — auto-selecting: '{scheme_raw}'")
+        # ── Scheme ────────────────────────────────────────────────────────
+        # Always "Pradhan Mantri Fasal Bima Yojna" (or PMFBY)
+        scheme_raw = "Pradhan Mantri Fasal Bima Yojna"
+        scheme = await self._select_by_selector_label(page, SEL_SCHEME, scheme_raw)
+        if not scheme: 
+            scheme = await self._select_required(page, SEL_SCHEME, "PMFBY", "Scheme")
+        else:
+            logger.success(f"  Selected Scheme: {scheme}")
 
-        scheme = await _select_required(page, 2, scheme_raw, "Scheme", wait_next=3)
+        await self._wait_selector_populated(page, SEL_STATE)
 
-        # ── State (index 3) — Required: 'state' from prompt ─────────────
-        state_raw = params.get("state", "")
+        # ── State ─────────────────────────────────────────────────────────
+        state_raw = profile.get("state")
         if not state_raw:
-            state_opts = await _get_modal_options(page, 3)
-            logger.info(f"States ({len(state_opts)}): {', '.join(state_opts[:5])}...")
-            state_raw = prompt_user("State")
+            state_raw = profile.get("address.state")
+        if not state_raw:
+            state_opts = await self._get_options_for_selector(page, SEL_STATE)
+            state_raw = await self._ask_sahayak(executor, "I could not find your state in the profile. Which state?", state_opts)
+            
+        state = await self._select_required(page, SEL_STATE, state_raw, "State")
 
-        state = await _select_required(page, 3, state_raw, "State", wait_next=4)
+        await self._wait_selector_populated(page, SEL_DISTRICT)
 
-        # ── District (index 4) — Ask user if not in prompt ───────────────
-        district_raw = params.get("district", "")
-        district_opts = await _get_modal_options(page, 4)
-        logger.info(f"Districts ({len(district_opts)}): {', '.join(district_opts[:5])}...")
+        # ── District ──────────────────────────────────────────────────────
+        district_raw = profile.get("district")
         if not district_raw:
-            district_raw = prompt_user("District")
+            district_raw = profile.get("address.district")
+        if not district_raw:
+            district_opts = await self._get_options_for_selector(page, SEL_DISTRICT)
+            district_raw = await self._ask_sahayak(executor, "I could not find your district. Which district?", district_opts)
+            
+        district = await self._select_required(page, SEL_DISTRICT, district_raw, "District")
 
-        district = await _select_required(page, 4, district_raw, "District", wait_next=5)
+        await self._wait_selector_populated(page, SEL_CROP)
 
-        # ── Crop (index 5) — Required: 'crop' from prompt ────────────────
-        crop_raw = params.get("crop", "")
-        crop_opts = await _get_modal_options(page, 5)
+        # ── Crop ──────────────────────────────────────────────────────────
+        crop_opts = await self._get_options_for_selector(page, SEL_CROP)
+        crop_raw = await self._ask_sahayak(executor, "Which crop are you insuring?", crop_opts)
+        crop = await self._select_required(page, SEL_CROP, crop_raw, "Crop")
 
-        if not crop_raw:
-            logger.info(f"Available crops: {', '.join(crop_opts)}")
-            crop_raw = prompt_user("Crop Name")
-
-        # Check crop availability BEFORE attempting selection
-        matched_crop = _smart_match(crop_raw, crop_opts)
-        if matched_crop is None:
-            # Crop not available — clean abort with full options list
-            raise TaskAbortError(
-                f"Crop '{crop_raw}' is not available for the selected "
-                f"scheme/season/state/district combination.\n\n"
-                f"Available crops ({len(crop_opts)}):\n"
-                + "\n".join(f"  • {c}" for c in sorted(crop_opts))
-                + f"\n\nTip: Re-run with one of the listed crops above."
-            )
-
-        crop = await _select_required(page, 5, crop_raw, "Crop")
+        # ── Area ──────────────────────────────────────────────────────────
+        area_raw = await self._ask_sahayak(executor, "Please enter the area of your land in hectares.")
+        await page.fill(SEL_AREA, area_raw)
+        logger.success(f"  Filled Area: {area_raw}")
 
         # ── Click Calculate ───────────────────────────────────────────────
         logger.step("Clicking Calculate...")
         try:
-            calc_btn = page.locator("button:has-text('Calculate')").last
+            calc_btn = page.locator(f"{SEL_CALCULATE}, button:has-text('Calculate')").last
             await calc_btn.wait_for(state="visible", timeout=5000)
             await calc_btn.click()
             await asyncio.sleep(5)
@@ -374,7 +339,7 @@ class PremiumCalculatorTask:
             "state": state,
             "district": district,
             "crop": crop,
-            "area_ha": params.get("area", ""),
+            "area_ha": area_raw,
             "status": "completed",
             "result_preview": result_text[:600] if result_text else "See premium_result.png",
         }
@@ -382,3 +347,4 @@ class PremiumCalculatorTask:
     def _abort(self, reason: str) -> dict:
         logger.error(f"\n❌ Calculation aborted: {reason}\n")
         return {"task": "premium_calculator", "status": "aborted", "reason": reason}
+

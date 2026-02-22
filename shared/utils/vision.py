@@ -26,7 +26,7 @@ from . import logger
 load_dotenv()
 
 _NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
-_DEFAULT_MODEL = "meta/llama-4-maverick-17b-128e-instruct"
+_DEFAULT_MODEL = "nvidia/nemotron-nano-12b-v2-vl"
 
 _COORD_PROMPT = """\
 You are a precise UI element locator. You will be shown a screenshot of a webpage.
@@ -82,24 +82,30 @@ def _stream_vlm_response(api_key: str, model: str, api_url: str,
         "model": model,
         "messages": [
             {
+                "role": "system",
+                "content": "/think"
+            },
+            {
                 "role": "user",
                 "content": [
+                    {
+                        "type": "text",
+                        "text": prompt,
+                    },
                     {
                         "type": "image_url",
                         "image_url": {
                             "url": f"data:image/png;base64,{image_b64}"
                         },
-                    },
-                    {
-                        "type": "text",
-                        "text": prompt,
-                    },
+                    }
                 ],
             }
         ],
-        "max_tokens": 512,
-        "temperature": 0.1,
-        "top_p": 0.9,
+        "max_tokens": 4096,
+        "temperature": 1,
+        "top_p": 1,
+        "frequency_penalty": 0,
+        "presence_penalty": 0,
         "stream": True,
     }
 

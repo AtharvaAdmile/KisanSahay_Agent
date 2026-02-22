@@ -7,6 +7,9 @@ Improvements:
   - On any step failure, Navigator.recover() is called to reroute to the
     correct page, then the step is retried once before giving up.
   - Tracks the current intent so Navigator can reason about routing.
+  - Planned fill/click/select/task steps execute directly (no fake ReAct loop).
+  - agentic_loop has iteration limit and per-iteration timeout.
+  - user_input_queue.get() has a 5-minute timeout to prevent indefinite blocking.
 """
 
 import asyncio
@@ -17,6 +20,12 @@ from ..agent.navigator import Navigator
 from ..agent.reasoning import ReasoningEngine
 from ..utils import logger
 from ..utils.user_profile import UserProfile
+
+# Limits
+MAX_AGENTIC_ITERATIONS = 50
+USER_INPUT_TIMEOUT = 300  # 5 minutes
+DOM_FETCH_TIMEOUT = 15    # seconds
+LLM_CALL_TIMEOUT = 30    # seconds (not enforced here since reasoning is sync, but documented)
 
 
 class Executor:
@@ -53,6 +62,17 @@ class Executor:
             handler_class = getattr(module, handler_config.class_name)
             self._handlers[name] = handler_class(self.browser, self.verbose)
         return self._handlers[name]
+
+    async def _await_user_input(self) -> str:
+        """Wait for user input with a timeout to prevent indefinite blocking."""
+        try:
+            return await asyncio.wait_for(
+                self.user_input_queue.get(),
+                timeout=USER_INPUT_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"User input timed out after {USER_INPUT_TIMEOUT}s")
+            raise TimeoutError(f"No user response received within {USER_INPUT_TIMEOUT} seconds")
 
     async def _run_step(self, step: dict) -> None:
         """Execute a single plan step. Called directly + on recovery retry."""
@@ -104,6 +124,9 @@ class Executor:
             handler = self._get_handler(step["handler"])
             method = getattr(handler, step["method"])
             params = step.get("params", {})
+            # Pass executor reference and profile so task handlers can use I/O queues
+            params["executor"] = self
+            params["profile"] = self._profile
             result = await method(**params)
             if result:
                 self.results.update(result)
@@ -144,66 +167,24 @@ class Executor:
         """
         Execute a full action plan step by step.
 
-        Runs a reasoning loop evaluating the DOM before executing each interactive step.
+        - agentic_loop steps use LLM-driven reasoning with iteration limits.
+        - fill/click/select/task steps execute directly (deterministic selectors).
         """
+        self._profile = profile or {}
         logger.section("Executing Plan", style=self.config.banner_color)
 
         for i, step in enumerate(plan, 1):
             action = step.get("action")
             logger.step(f"Step {i}/{len(plan)}: {action}")
 
-            if action in ["fill", "click", "select", "task"]:
-                # ReAct Evaluation Loop
-                while True:
-                    logger.info("Executing reasoning loop to check DOM state...")
-                    dom_state = await self.browser.get_dom_state()
-                    
-                    decision = self.reasoning.decide_next_step(
-                        intent=self._current_intent,
-                        dom_state=dom_state,
-                        step=step,
-                        profile=profile
-                    )
-                    
-                    d_type = decision.get("type", "ACTION")
-                    
-                    if d_type == "ASK_USER":
-                        question = decision.get("question", "I need more information.")
-                        options = decision.get("options", [])
-                        
-                        logger.warning(f"Yielding to user: {question}")
-                        await self.agent_output_queue.put({
-                            "status": "requires_input",
-                            "question": question,
-                            "options": options
-                        })
-                        
-                        user_answer = await self.user_input_queue.get()
-                        logger.info(f"Received user answer: {user_answer}")
-                        
-                        if isinstance(profile, dict):
-                            if "_history" not in profile:
-                                profile["_history"] = {}
-                            profile["_history"][question] = user_answer
-                            
-                    elif d_type == "READY_TO_SUBMIT":
-                        await self.agent_output_queue.put({
-                            "status": "ready_to_submit",
-                            "summary": decision.get("summary", {})
-                        })
-                        logger.info("Waiting for final user confirmation...")
-                        await self.user_input_queue.get()
-                        logger.info("User confirmed final submission.")
-                        break  # Proceed to execute the submit step
-                        
-                    else:  # ACTION
-                        # The LLM says we have enough data (or it proposed a dynamic action).
-                        # We break the reasoning loop to let the planned step execute.
-                        # Alternatively, we could execute the LLM's dynamic action here, but
-                        # for safety, we'll let the deterministic planned step run.
-                        logger.info("Reasoning complete. Proceeding with planned step.")
-                        break
+            if action == "agentic_loop":
+                logger.info("Starting open-ended agentic loop...")
+                await self._run_agentic_loop(step, profile)
+                continue
 
+            # For fill/click/select/task: execute directly without a ReAct loop.
+            # These steps have deterministic selectors — reasoning adds latency
+            # for no benefit. The task handler has its own domain-specific logic.
             try:
                 await self._run_step(step)
                 logger.success(f"Step {i} complete")
@@ -216,7 +197,7 @@ class Executor:
                 except Exception:
                     pass
 
-                logger.info(f"⟳ Attempting auto-recovery for step {i}...")
+                logger.info(f"Attempting auto-recovery for step {i}...")
                 recovered = await self._navigator.recover(reason=str(e))
 
                 if recovered:
@@ -243,3 +224,124 @@ class Executor:
 
         logger.section("Execution Complete", style=self.config.banner_color)
         return self.results
+
+    async def _run_agentic_loop(self, step: dict, profile: dict) -> None:
+        """
+        Run the LLM-driven agentic loop with iteration limits and timeouts.
+        """
+        for iteration in range(MAX_AGENTIC_ITERATIONS):
+            logger.info(f"Agentic loop iteration {iteration + 1}/{MAX_AGENTIC_ITERATIONS}")
+
+            # Fetch DOM state with timeout
+            try:
+                dom_state = await asyncio.wait_for(
+                    self.browser.get_dom_state(),
+                    timeout=DOM_FETCH_TIMEOUT
+                )
+            except asyncio.TimeoutError:
+                logger.error(f"DOM state fetch timed out after {DOM_FETCH_TIMEOUT}s")
+                await asyncio.sleep(2)
+                continue
+
+            decision = self.reasoning.decide_next_step(
+                intent=self._current_intent,
+                dom_state=dom_state,
+                step=step,
+                profile=profile
+            )
+
+            d_type = decision.get("type", "ACTION")
+
+            if d_type == "ASK_USER":
+                question = decision.get("question", "I need more information.")
+                options = decision.get("options", [])
+
+                logger.warning(f"Yielding to user: {question}")
+                await self.agent_output_queue.put({
+                    "status": "requires_input",
+                    "question": question,
+                    "options": options
+                })
+
+                user_answer = await self._await_user_input()
+                logger.info(f"Received user answer: {user_answer}")
+
+                if isinstance(profile, dict):
+                    if "_history" not in profile:
+                        profile["_history"] = {}
+                    profile["_history"][question] = user_answer
+
+            elif d_type == "READY_TO_SUBMIT":
+                await self.agent_output_queue.put({
+                    "status": "ready_to_submit",
+                    "summary": decision.get("summary", {})
+                })
+                logger.info("Waiting for final user confirmation...")
+                await self._await_user_input()
+                logger.info("User confirmed final submission.")
+                break
+
+            else:  # ACTION
+                act = decision.get("action")
+                selector = decision.get("selector", "")
+                value = decision.get("value", "")
+                logger.info(f"Executing dynamic action: {decision}")
+
+                # Re-fetch DOM before executing to mitigate TOCTOU
+                try:
+                    dom_state = await asyncio.wait_for(
+                        self.browser.get_dom_state(),
+                        timeout=DOM_FETCH_TIMEOUT
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("DOM re-fetch timed out, proceeding with stale state")
+
+                # Fallback for empty selectors — use vision-based interaction
+                if not selector and act in ["fill", "click", "select"]:
+                    from_label = decision.get("label", "the target field")
+                    dummy_selector = "non_existent_element_force_vision"
+                    try:
+                        if act == "fill":
+                            await self.browser.vision_fill(dummy_selector, value, f"the input field for {from_label}", timeout=100)
+                        elif act == "click":
+                            await self.browser.vision_click(dummy_selector, f"the {from_label} button", timeout=100)
+                        elif act == "select":
+                            await self.browser.vision_select(0, value, f"the dropdown for {from_label}")
+                    except Exception as e:
+                        logger.error(f"Vision fallback failed: {e}")
+                    await asyncio.sleep(2)
+                    continue
+
+                try:
+                    if act == "fill":
+                        try:
+                            await self.browser.fill(selector, value)
+                        except Exception as e1:
+                            logger.warning(f"Standard fill failed, trying vision... {e1}")
+                            await self.browser.vision_fill(selector, value, f"the input field at {selector}")
+                    elif act == "click":
+                        if decision.get("vision"):
+                            await self.browser.vision_click(selector, decision.get("description", selector))
+                        else:
+                            try:
+                                await self.browser.click(selector)
+                            except Exception as e2:
+                                logger.warning(f"Standard click failed, trying vision... {e2}")
+                                await self.browser.vision_click(selector, f"the button at {selector}")
+                    elif act == "select":
+                        try:
+                            await self.browser.select_option(selector, value=value, label=value)
+                        except Exception as e3:
+                            logger.warning(f"Standard select failed, trying vision... {e3}")
+                            await self.browser.vision_select(0, value, f"the dropdown at {selector}")
+                    await asyncio.sleep(2)
+                except Exception as e:
+                    logger.error(f"Dynamic action failed: {e}")
+                    await asyncio.sleep(2)
+        else:
+            # Loop exhausted without break — hit iteration limit
+            logger.error(f"Agentic loop hit iteration limit ({MAX_AGENTIC_ITERATIONS})")
+            await self.agent_output_queue.put({
+                "status": "error",
+                "error": f"Agent exceeded maximum iterations ({MAX_AGENTIC_ITERATIONS})"
+            })
